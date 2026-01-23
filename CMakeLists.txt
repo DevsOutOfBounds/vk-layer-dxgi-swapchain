@@ -39,8 +39,8 @@ add_library (doob-vk-dxgi-swapchain SHARED
 "src/Core.h" 
 "src/Instance.cpp" 
 
-"src/DxgiSwapchain.h" 
-"src/DxgiSwapchain.cpp")
+"src/DxgiSwapchain.hpp" 
+"src/DxgiSwapchain.cpp" "src/vk_doob_dxgi.h")
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET doob-vk-dxgi-swapchain PROPERTY CXX_STANDARD 20)

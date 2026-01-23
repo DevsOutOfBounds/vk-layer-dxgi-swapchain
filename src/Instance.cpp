@@ -1,29 +1,102 @@
 ﻿#pragma once
 
 #include "Core.h"
+#include "DxgiSwapchain.h"
+#include "D3D11FactoryInfo.h"
+#include "vk_doob_dxgi.h"
 
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 std::mutex global_lock;
 typedef std::lock_guard<std::mutex> scoped_lock;
 
+
+// ==== Dispatch table ====
+
 std::unordered_map<VkInstance, VkLayerInstanceDispatchTable> g_instance_dispatch;
 std::unordered_map<VkDevice, VkLayerDispatchTable> g_device_dispatch;
+std::unordered_map<VkDevice, DOOB_D3D11FactoryInfo> g_device_d3d_factory_dispatch;
 std::unordered_map<VkQueue, VkDevice> g_queue_ownership;
 
-struct DoobSwapchainHandle {
-	int unused_todo = 0;
-};
+#define DOOB_CALL_DISPATCH_TABLE(table, object, retval, fn, params) do { PFN_vk##fn icd_function_call = NULL; \
+{ scoped_lock l(global_lock); icd_function_call = table[object].fn; } retval = icd_function_call params; } while (false) 
 
-static VkAllocationCallbacks GetFilledAllocationCallbacks(VkAllocationCallbacks callbacks) {
+#define DOOB_CALL_VOID_DISPATCH_TABLE(table, object, fn, params) do { PFN_vk##fn icd_function_call = NULL; \
+{ scoped_lock l(global_lock); icd_function_call = table[object].fn; } (void)icd_function_call params; } while (false) 
+
+//  ==== Handle table ====
+
+std::vector<DOOB_DxgiSwapchain*> g_dxgi_swapchains = {};
+
+#define DOOB_INVALID_COUNTER_HANDLE (~0U)
+#define DOOB_SWAPCHAIN_HANDLE_ID (0x1020'0000)
+
+
+template <typename TNonDispatchableHandle>
+static TNonDispatchableHandle DOOB_MakeHandle(uint32_t id, uint32_t counter) {
+	TNonDispatchableHandle handle;
+	*(uint64_t*)(&handle) = ((uint64_t)(id) << 32) | (counter);
+	return handle;
+}
+template <typename TNonDispatchableHandle>
+static uint32_t DOOB_GetCounterAndVerify(uint32_t target_id, TNonDispatchableHandle handle) {
+	uint64_t p = *(uint64_t*)(handle);
+	uint32_t id = (uint32_t)(p >> 32);
+	uint32_t counter = (uint32_t)(p & 0xFFFFFFFF);
+	if (id != target_id) {
+		return DOOB_INVALID_COUNTER_HANDLE;
+	}
+}
+template <typename TObject, typename TNonDispatchableHandle>
+static TObject* DOOB_GetObjectIfExists(std::vector<TObject*>& data_array, uint32_t target_id, TNonDispatchableHandle handle) {
+	uint32_t h = DOOB_GetCounterAndVerify<TNonDispatchableHandle>(target_id, handle);
+	if (h == DOOB_INVALID_COUNTER_HANDLE) {
+		return NULL;
+	}
+	scoped_lock l(global_lock);
+	if (h >= data_array.size()) {
+		return NULL;
+	}
+	return data_array[h];
+}
+
+template <typename TObject>
+static TObject* DOOB_AllocCountedHandle(std::vector<TObject*>& data_array, uint32_t* out_counter, const VkAllocationCallbacks* alloc) {
+	scoped_lock l(global_lock);
+	*out_counter = (uint32_t)data_array.size();
+	for (size_t i = 0; i < data_array.size(); ++i) {
+		if (data_array[i] == NULL) {
+			*out_counter = (uint32_t)i;
+			break;
+		}
+	}
+	if (*out_counter > data_array.size()) {
+		data_array.push_back({});
+	}
+	TObject* obj = (TObject*)alloc->pfnAllocation(NULL, sizeof(TObject), 1, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+	data_array[*out_counter] = obj;
+	return obj;
+}
+template <typename TObject>
+static void DOOB_ReleaseCountedHandle(std::vector<TObject*>& data_array, uint32_t handle, const VkAllocationCallbacks* alloc) {
+	scoped_lock l(global_lock);
+	if (handle >= data_array.size()) {
+		return;
+	}
+	alloc->pfnFree(NULL, (void*)data_array[handle]);
+	data_array[handle] = NULL;
+}
+
+static VkAllocationCallbacks DOOB_GetFilledAllocationCallbacks(VkAllocationCallbacks callbacks) {
 	if (!callbacks.pfnAllocation) {
 		callbacks.pfnAllocation = [](
 			void* pUserData,
 			size_t                                      size,
 			size_t                                      alignment,
 			VkSystemAllocationScope                     allocationScope
-			) {return malloc(size); };
+			) { return malloc(size); };
 	}
 	if (!callbacks.pfnReallocation) {
 		callbacks.pfnReallocation = [](
@@ -32,38 +105,24 @@ static VkAllocationCallbacks GetFilledAllocationCallbacks(VkAllocationCallbacks 
 			size_t                                      size,
 			size_t                                      alignment,
 			VkSystemAllocationScope                     allocationScope
-			) {return realloc(pOriginal, size); };
+			) { return realloc(pOriginal, size); };
 	}
 	if (!callbacks.pfnFree) {
 		callbacks.pfnFree = [](
 			void* pUserData,
 			void* pMemory
-			) {return free(pMemory); };
+			) { return free(pMemory); };
 	}
-}
-
-#define DOOB_CALL_DISPATCH_TABLE(table, object, retval, fn, params) do { PFN_vk##fn icd_function_call = nullptr; \
-{ scoped_lock l(global_lock); icd_function_call = table[object].fn; } retval = icd_function_call params; } while (false) 
-
-#define DOOB_CALL_VOID_DISPATCH_TABLE(table, object, fn, params) do { PFN_vk##fn icd_function_call = nullptr; \
-{ scoped_lock l(global_lock); icd_function_call = table[object].fn; } (void)icd_function_call params; } while (false) 
-
-static void GetLayerProperties(VkLayerProperties& properties) {
-	memset(properties.layerName, 0, sizeof(properties.layerName));
-	memset(properties.description, 0, sizeof(properties.layerName));
-	strncpy(properties.layerName, DOOB_LAYER_NAME, sizeof(DOOB_LAYER_NAME));
-	strncpy(properties.description, DOOB_LAYER_DESCRIPTION, sizeof(DOOB_LAYER_DESCRIPTION));
-	properties.implementationVersion = 0x1;
-	properties.specVersion = VK_HEADER_VERSION_COMPLETE;
+	return callbacks;
 }
 
 VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_EnumerateInstanceLayerProperties(
 	uint32_t* pPropertyCount,
 	VkLayerProperties* pProperties) {
-	if (pPropertyCount == nullptr) {
+	if (pPropertyCount == NULL) {
 		return VK_INCOMPLETE;
 	}
-	if (pProperties == nullptr) {
+	if (pProperties == NULL) {
 		*pPropertyCount = 1;
 		return VK_SUCCESS;
 	}
@@ -71,7 +130,13 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_EnumerateInstanceLayerProperties(
 		return VK_INCOMPLETE;
 	}
 	if (pProperties) {
-		GetLayerProperties(pProperties[0]);
+		VkLayerProperties& properties = pProperties[0];
+		memset(properties.layerName, 0, sizeof(properties.layerName));
+		memset(properties.description, 0, sizeof(properties.layerName));
+		strncpy(properties.layerName, DOOB_LAYER_NAME, sizeof(DOOB_LAYER_NAME));
+		strncpy(properties.description, DOOB_LAYER_DESCRIPTION, sizeof(DOOB_LAYER_DESCRIPTION));
+		properties.implementationVersion = 0x1;
+		properties.specVersion = VK_HEADER_VERSION_COMPLETE;
 	}
 	return VK_SUCCESS;
 }
@@ -122,6 +187,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateInstance(
 	ASSIGN_DISPATCH(CreateInstance);
 	ASSIGN_DISPATCH(CreateDevice);
 	ASSIGN_DISPATCH(DestroyInstance);
+	ASSIGN_DISPATCH(GetPhysicalDevicePresentRectanglesKHR);
 
 #undef ASSIGN_DISPATCH
 
@@ -184,6 +250,17 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateDevice(
 	if (ret != VK_SUCCESS) {
 		return ret;
 	}
+
+	VkDxgiDeviceFeaturesDOOB* dxgi_device_features = (VkDxgiDeviceFeaturesDOOB*)pCreateInfo->pNext;
+	while (dxgi_device_features && (dxgi_device_features->sType != VK_STRUCTURE_TYPE_DXGI_DEVICE_FEATURES_DOOB))
+	{
+		dxgi_device_features = (VkDxgiDeviceFeaturesDOOB*)dxgi_device_features->pNext;
+	}
+
+	if (dxgi_device_features) {
+		// use this to create the dxgi context
+	}
+
 #define ASSIGN_DISPATCH(fn) dispatchTable.fn = (PFN_vk##fn)gdpa(*pDevice, "vk"#fn) 
 
 	// fetch our own dispatch table for the functions we need, into the next layer
@@ -192,15 +269,30 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateDevice(
 	ASSIGN_DISPATCH(DestroyDevice);
 	ASSIGN_DISPATCH(GetDeviceQueue);
 	ASSIGN_DISPATCH(GetDeviceQueue2);
+	ASSIGN_DISPATCH(GetDeviceGroupPresentCapabilitiesKHR);
+	ASSIGN_DISPATCH(QueuePresentKHR);
 	ASSIGN_DISPATCH(CreateSwapchainKHR);
+	ASSIGN_DISPATCH(CreateSharedSwapchainsKHR);
 	ASSIGN_DISPATCH(DestroySwapchainKHR);
 	ASSIGN_DISPATCH(AcquireNextImageKHR);
 	ASSIGN_DISPATCH(AcquireNextImage2KHR);
-	ASSIGN_DISPATCH(GetDeviceGroupPresentCapabilitiesKHR);
 	ASSIGN_DISPATCH(GetSwapchainImagesKHR);
-	// ASSIGN_DISPATCH(GetPhysicalDevicePresentRectanglesKHR);
-	ASSIGN_DISPATCH(QueuePresentKHR);
-	ASSIGN_DISPATCH(GetSwapchainImagesKHR);
+	ASSIGN_DISPATCH(GetSwapchainStatusKHR);
+	ASSIGN_DISPATCH(AcquireFullScreenExclusiveModeEXT);
+	ASSIGN_DISPATCH(GetPastPresentationTimingGOOGLE);
+	ASSIGN_DISPATCH(GetRefreshCycleDurationGOOGLE);
+	ASSIGN_DISPATCH(GetSwapchainCounterEXT);
+	ASSIGN_DISPATCH(GetSwapchainTimeDomainPropertiesEXT);
+	ASSIGN_DISPATCH(GetSwapchainTimingPropertiesEXT);
+	ASSIGN_DISPATCH(LatencySleepNV);
+	ASSIGN_DISPATCH(ReleaseFullScreenExclusiveModeEXT);
+	ASSIGN_DISPATCH(SetHdrMetadataEXT);
+	ASSIGN_DISPATCH(SetLatencyMarkerNV);
+	ASSIGN_DISPATCH(SetLatencySleepModeNV);
+	ASSIGN_DISPATCH(SetLocalDimmingAMD);
+	ASSIGN_DISPATCH(SetSwapchainPresentTimingQueueSizeEXT);
+	ASSIGN_DISPATCH(WaitForPresentKHR);
+	ASSIGN_DISPATCH(WaitForPresent2KHR);
 
 #undef ASSIGN_DISPATCH
 	// store the table by key
@@ -245,8 +337,7 @@ VK_LAYER_EXPORT void VKAPI_CALL DOOB_GetDeviceQueue(
 	uint32_t                                    queueIndex,
 	VkQueue* pQueue) {
 
-	printf("Intercept GetDeviceQueue\n");
-
+	printf("TEST REMOVE ME Intercept GetDeviceQueue\n");
 
 	g_device_dispatch[device].GetDeviceQueue(device, queueFamilyIndex, queueIndex, pQueue);
 	if (pQueue) {
@@ -255,7 +346,25 @@ VK_LAYER_EXPORT void VKAPI_CALL DOOB_GetDeviceQueue(
 	}
 }
 
+VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetDeviceGroupPresentCapabilitiesKHR(
+	VkDevice                                    device,
+	VkDeviceGroupPresentCapabilitiesKHR* pDeviceGroupPresentCapabilities) {
 
+	// TODO
+
+	return VK_INCOMPLETE;
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetPhysicalDevicePresentRectanglesKHR(
+	VkPhysicalDevice                            physicalDevice,
+	VkSurfaceKHR                                surface,
+	uint32_t* pRectCount,
+	VkRect2D* pRects) {
+
+	// TODO
+
+	return VK_INCOMPLETE;
+}
 VK_LAYER_EXPORT void VKAPI_CALL DOOB_GetDeviceQueue2(
 	VkDevice                                    device,
 	const VkDeviceQueueInfo2* pQueueInfo,
@@ -268,54 +377,6 @@ VK_LAYER_EXPORT void VKAPI_CALL DOOB_GetDeviceQueue2(
 	}
 }
 
-
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
-	VkDevice                                    device,
-	const VkSwapchainCreateInfoKHR* pCreateInfo,
-	const VkAllocationCallbacks* pAllocator,
-	VkSwapchainKHR* pSwapchain) {
-
-	printf("Intercept CreateSwapchainKHR\n");
-
-	VkResult ret;
-	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, ret, CreateSwapchainKHR, (device, pCreateInfo, pAllocator, pSwapchain));
-	return ret;
-}
-
-
-VK_LAYER_EXPORT void VKAPI_CALL DOOB_DestroySwapchainKHR(
-	VkDevice                                    device,
-	VkSwapchainKHR                              swapchain,
-	const VkAllocationCallbacks* pAllocator) {
-
-	DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, DestroySwapchainKHR, (device, swapchain, pAllocator));
-}
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetSwapchainImagesKHR(
-	VkDevice                                    device,
-	VkSwapchainKHR                              swapchain,
-	uint32_t* pSwapchainImageCount,
-	VkImage* pSwapchainImages) {
-
-	VkResult ret;
-	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, ret, GetSwapchainImagesKHR, (device, swapchain, pSwapchainImageCount, pSwapchainImages));
-	return ret;
-}
-
-
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_AcquireNextImageKHR(
-	VkDevice                                    device,
-	VkSwapchainKHR                              swapchain,
-	uint64_t                                    timeout,
-	VkSemaphore                                 semaphore,
-	VkFence                                     fence,
-	uint32_t* pImageIndex) {
-
-	VkResult ret;
-	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, ret, AcquireNextImageKHR, (device, swapchain, timeout, semaphore, fence, pImageIndex));
-	return ret;
-}
-
-
 VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_QueuePresentKHR(
 	VkQueue                                     queue,
 	const VkPresentInfoKHR* pPresentInfo) {
@@ -325,59 +386,334 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_QueuePresentKHR(
 		scoped_lock l(global_lock);
 		device = g_queue_ownership[queue];
 	}
-	VkResult ret;
-	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, ret, QueuePresentKHR, (queue, pPresentInfo));
-	return ret;
+	assert(device != VK_NULL_HANDLE);
+
+	bool has_doob_swapchain = false;
+	for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
+		if (DOOB_GetCounterAndVerify(DOOB_SWAPCHAIN_HANDLE_ID, pPresentInfo->pSwapchains[i]) != DOOB_INVALID_COUNTER_HANDLE) {
+			has_doob_swapchain = true;
+			break;
+		}
+	}
+
+	if (!has_doob_swapchain) {
+		VkResult ret;
+		DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, ret, QueuePresentKHR, (queue, pPresentInfo));
+		return ret;
+	}
+
+
+	std::vector<VkSwapchainKHR> non_doob_swapchains = {};
+	std::vector<uint32_t> non_doob_swapchain_img_indices = {};
+	std::vector<uint32_t> non_doob_swapchain_reverse_indices = {}; // maps array index back to input index (important for writing VK_RESULT)
+	for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
+		VkSwapchainKHR sc = pPresentInfo->pSwapchains[i];
+		DOOB_DxgiSwapchain* doob_sc = DOOB_GetObjectIfExists(g_dxgi_swapchains, DOOB_SWAPCHAIN_HANDLE_ID, sc);
+
+		if (doob_sc) {
+			// DXGI PRESENT HERE
+			// NOTE: how to deal with the pWaitSemaphores?
+			// pPresentInfo->pResults[i] = ...
+		}
+		else {
+			non_doob_swapchains.push_back(sc);
+			non_doob_swapchain_img_indices.push_back(pPresentInfo->pImageIndices[i]);
+			non_doob_swapchain_reverse_indices.push_back(i);
+		}
+	}
+
+	if (non_doob_swapchains.size() > 0) {
+		std::vector<VkResult> results{};
+
+		VkPresentInfoKHR temp_present_info{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+		// FIXME: for certain pNext chains the indices might not match up anymore!!!
+		temp_present_info.pNext = pPresentInfo->pNext;
+		temp_present_info.waitSemaphoreCount = pPresentInfo->waitSemaphoreCount;
+		temp_present_info.pWaitSemaphores = pPresentInfo->pWaitSemaphores;
+		temp_present_info.swapchainCount = (uint32_t)non_doob_swapchains.size();
+		temp_present_info.pSwapchains = non_doob_swapchains.data();
+		temp_present_info.pImageIndices = non_doob_swapchain_img_indices.data();
+		if (pPresentInfo->pResults) {
+			results.resize(non_doob_swapchains.size());
+			temp_present_info.pResults = results.data();
+		}
+		VkResult ret;
+		DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, ret, QueuePresentKHR, (queue, &temp_present_info));
+		if (pPresentInfo->pResults) {
+			// remap results
+			for (uint32_t i = 0; i < temp_present_info.swapchainCount; ++i) {
+				pPresentInfo->pResults[non_doob_swapchain_reverse_indices[i]] = results[i];
+			}
+		}
+
+		return ret;
+	}
+
+	return VK_SUCCESS;
 }
 
-
-
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetDeviceGroupPresentCapabilitiesKHR(
+VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
 	VkDevice                                    device,
-	VkDeviceGroupPresentCapabilitiesKHR* pDeviceGroupPresentCapabilities) {
+	const VkSwapchainCreateInfoKHR* pCreateInfo,
+	const VkAllocationCallbacks* pAllocator,
+	VkSwapchainKHR* pSwapchain) {
 
-	VkResult ret;
-	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, ret, GetDeviceGroupPresentCapabilitiesKHR, (device, pDeviceGroupPresentCapabilities));
-	return ret;
+	printf("[DOOB] Your swapchain is out of bounds\n");
+
+	VkDxgiSwapchainCreateInfoDOOB* dxgi_info = (VkDxgiSwapchainCreateInfoDOOB*)pCreateInfo->pNext;
+	while (dxgi_info && (dxgi_info->sType != VK_STRUCTURE_TYPE_DXGI_SWAPCHAIN_CREATE_INFO_DOOB))
+	{
+		dxgi_info = (VkDxgiSwapchainCreateInfoDOOB*)dxgi_info->pNext;
+	}
+	if (!dxgi_info) {
+		VkResult ret;
+		DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, ret, CreateSwapchainKHR, (device, pCreateInfo, pAllocator, pSwapchain));
+		return ret;
+	}
+
+	VkAllocationCallbacks alloc = DOOB_GetFilledAllocationCallbacks(*pAllocator);
+
+	uint32_t swapchain_handle;
+	DOOB_DxgiSwapchain* swapchain_obj = DOOB_AllocCountedHandle(g_dxgi_swapchains, &swapchain_handle, &alloc);
+	if (!swapchain_obj) {
+		return VK_ERROR_OUT_OF_HOST_MEMORY;
+	}
+
+	// create swapchain here
+
+	*pSwapchain = DOOB_MakeHandle<VkSwapchainKHR>(DOOB_SWAPCHAIN_HANDLE_ID, swapchain_handle);
+
+	return VK_SUCCESS;
 }
-
-
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetDeviceGroupSurfacePresentModesKHR(
+VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateSharedSwapchainsKHR(
 	VkDevice                                    device,
-	VkSurfaceKHR                                surface,
-	VkDeviceGroupPresentModeFlagsKHR* pModes) {
+	uint32_t                                    swapchainCount,
+	const VkSwapchainCreateInfoKHR* pCreateInfos,
+	const VkAllocationCallbacks* pAllocator,
+	VkSwapchainKHR* pSwapchains) {
 
-	VkResult ret;
-	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, ret, GetDeviceGroupSurfacePresentModesKHR, (device, surface, pModes));
-	return ret;
+	// TODO
+
+	return VK_INCOMPLETE;
 }
 
-//VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetPhysicalDevicePresentRectanglesKHR(
-//	VkPhysicalDevice                            physicalDevice,
-//	VkSurfaceKHR                                surface,
-//	uint32_t* pRectCount,
-//	VkRect2D* pRects) {
-//
-//	return VK_ERROR_INCOMPATIBLE_DRIVER;
-//}
+VK_LAYER_EXPORT void VKAPI_CALL DOOB_DestroySwapchainKHR(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapchain,
+	const VkAllocationCallbacks* pAllocator) {
+
+	VkAllocationCallbacks alloc = DOOB_GetFilledAllocationCallbacks(*pAllocator);
+
+	uint32_t swapchain_handle = DOOB_GetCounterAndVerify(DOOB_SWAPCHAIN_HANDLE_ID, swapchain);
+	if (swapchain_handle == DOOB_INVALID_COUNTER_HANDLE) {
+		return;
+	}
+	DOOB_ReleaseCountedHandle(g_dxgi_swapchains, swapchain_handle, &alloc);
+}
+VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetSwapchainImagesKHR(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapchain,
+	uint32_t* pSwapchainImageCount,
+	VkImage* pSwapchainImages) {
+
+	// EXAMPLE HOW TO USE:
+
+	DOOB_DxgiSwapchain* swapchain_obj = DOOB_GetObjectIfExists(g_dxgi_swapchains, DOOB_SWAPCHAIN_HANDLE_ID, swapchain);
+	if (!swapchain_obj) {
+		// not found in our database! probably normal swapchain, call normal function
+
+		VkResult vkresult;
+		DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, vkresult, GetSwapchainImagesKHR, (device, swapchain, pSwapchainImageCount, pSwapchainImages));
+		return vkresult;
+	}
 
 
+	// swapchain_obj->...
+
+	return VK_INCOMPLETE;
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetSwapchainStatusKHR(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapchain) {
+
+	// TODO
+
+	return VK_INCOMPLETE;
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_AcquireFullScreenExclusiveModeEXT(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapchain) {
+
+	// TODO
+
+	return VK_INCOMPLETE;
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_AcquireNextImageKHR(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapchain,
+	uint64_t                                    timeout,
+	VkSemaphore                                 semaphore,
+	VkFence                                     fence,
+	uint32_t* pImageIndex) {
+
+	// TODO
+
+	return VK_INCOMPLETE;
+}
 VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_AcquireNextImage2KHR(
 	VkDevice                                    device,
 	const VkAcquireNextImageInfoKHR* pAcquireInfo,
 	uint32_t* pImageIndex) {
 
-	VkResult ret;
-	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, ret, AcquireNextImage2KHR, (device, pAcquireInfo, pImageIndex));
-	return ret;
+	// TODO
+
+	return VK_INCOMPLETE;
+}
+VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetPastPresentationTimingGOOGLE(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapchain,
+	uint32_t* pPresentationTimingCount,
+	VkPastPresentationTimingGOOGLE* pPresentationTimings) {
+
+	// TODO
+
+	return VK_INCOMPLETE;
+}
+VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetRefreshCycleDurationGOOGLE(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapchain,
+	VkRefreshCycleDurationGOOGLE* pDisplayTimingProperties) {
+
+	// TODO
+
+	return VK_INCOMPLETE;
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL DOOB_GetSwapchainCounterEXT(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapchain,
+	VkSurfaceCounterFlagBitsEXT                 counter,
+	uint64_t* pCounterValue) {
+
+	// TODO
+
+	return VK_INCOMPLETE;
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetSwapchainTimeDomainPropertiesEXT(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapchain,
+	VkSwapchainTimeDomainPropertiesEXT* pSwapchainTimeDomainProperties,
+	uint64_t* pTimeDomainsCounter) {
+
+	// TODO
+
+	return VK_INCOMPLETE;
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetSwapchainTimingPropertiesEXT(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapchain,
+	VkSwapchainTimingPropertiesEXT* pSwapchainTimingProperties,
+	uint64_t* pSwapchainTimingPropertiesCounter) {
+
+	// TODO
+
+	return VK_INCOMPLETE;
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_LatencySleepNV(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapchain,
+	const VkLatencySleepInfoNV* pSleepInfo) {
+
+	// TODO
+
+	return VK_INCOMPLETE;
+}
+VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_ReleaseFullScreenExclusiveModeEXT(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapchain) {
+
+	// TODO
+
+	return VK_INCOMPLETE;
+}
+VK_LAYER_EXPORT void VKAPI_CALL DOOB_SetHdrMetadataEXT(
+	VkDevice                                    device,
+	uint32_t                                    swapchainCount,
+	const VkSwapchainKHR* pSwapchains,
+	const VkHdrMetadataEXT* pMetadata) {
+
+	// TODO
+
+}
+VK_LAYER_EXPORT void VKAPI_CALL DOOB_SetLatencyMarkerNV(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapchain,
+	const VkSetLatencyMarkerInfoNV* pLatencyMarkerInfo) {
+
+	// TODO
+
+}
+VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_SetLatencySleepModeNV(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapchain,
+	const VkLatencySleepModeInfoNV* pSleepModeInfo) {
+
+	// TODO
+
+	return VK_INCOMPLETE;
+}
+
+VK_LAYER_EXPORT void VKAPI_CALL DOOB_SetLocalDimmingAMD(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapChain,
+	VkBool32                                    localDimmingEnable) {
+
+	// TODO
+
+}
+VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_SetSwapchainPresentTimingQueueSizeEXT(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapchain,
+	uint32_t                                    size) {
+
+	// TODO
+
+	return VK_INCOMPLETE;
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_WaitForPresentKHR(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapchain,
+	uint64_t                                    presentId,
+	uint64_t                                    timeout) {
+
+	// TODO
+
+	return VK_INCOMPLETE;
+}
+
+VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_WaitForPresent2KHR(
+	VkDevice                                    device,
+	VkSwapchainKHR                              swapchain,
+	const VkPresentWait2InfoKHR* pPresentWait2Info) {
+
+	// TODO
+
+	return VK_INCOMPLETE;
+}
 
 // ==== INSTANCE CREATION ====
 
 
 VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL DOOB_GetInstanceProcAddr(VkInstance instance, const char* pName)
 {
+
 	// instance chain functions we intercept
 	DOOB_GETPROCADDR(GetInstanceProcAddr);
 	DOOB_GETPROCADDR(EnumerateInstanceLayerProperties);
@@ -394,19 +730,34 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL DOOB_GetDeviceProcAddr(VkDevice de
 {
 	// device chain functions we intercept
 	DOOB_GETPROCADDR(GetDeviceProcAddr);
-	DOOB_GETPROCADDR(EnumerateDeviceLayerProperties);
-	DOOB_GETPROCADDR(CreateDevice);
 	DOOB_GETPROCADDR(DestroyDevice);
 	DOOB_GETPROCADDR(GetDeviceQueue);
 	DOOB_GETPROCADDR(GetDeviceQueue2);
-	DOOB_GETPROCADDR(CreateSwapchainKHR);
-	DOOB_GETPROCADDR(GetSwapchainImagesKHR);
-	DOOB_GETPROCADDR(AcquireNextImage2KHR);
-	DOOB_GETPROCADDR(AcquireNextImageKHR);
-	DOOB_GETPROCADDR(DestroySwapchainKHR);
 	DOOB_GETPROCADDR(GetDeviceGroupPresentCapabilitiesKHR);
-	// DOOB_GETPROCADDR(GetPhysicalDevicePresentRectanglesKHR);
-	DOOB_GETPROCADDR(GetDeviceGroupSurfacePresentModesKHR);
+	DOOB_GETPROCADDR(GetPhysicalDevicePresentRectanglesKHR);
+	DOOB_GETPROCADDR(QueuePresentKHR);
+	DOOB_GETPROCADDR(CreateSwapchainKHR);
+	DOOB_GETPROCADDR(CreateSharedSwapchainsKHR);
+	DOOB_GETPROCADDR(DestroySwapchainKHR);
+	DOOB_GETPROCADDR(AcquireNextImageKHR);
+	DOOB_GETPROCADDR(AcquireNextImage2KHR);
+	DOOB_GETPROCADDR(GetSwapchainImagesKHR);
+	DOOB_GETPROCADDR(GetSwapchainStatusKHR);
+	DOOB_GETPROCADDR(AcquireFullScreenExclusiveModeEXT);
+	DOOB_GETPROCADDR(GetPastPresentationTimingGOOGLE);
+	DOOB_GETPROCADDR(GetRefreshCycleDurationGOOGLE);
+	DOOB_GETPROCADDR(GetSwapchainCounterEXT);
+	DOOB_GETPROCADDR(GetSwapchainTimeDomainPropertiesEXT);
+	DOOB_GETPROCADDR(GetSwapchainTimingPropertiesEXT);
+	DOOB_GETPROCADDR(LatencySleepNV);
+	DOOB_GETPROCADDR(ReleaseFullScreenExclusiveModeEXT);
+	DOOB_GETPROCADDR(SetHdrMetadataEXT);
+	DOOB_GETPROCADDR(SetLatencyMarkerNV);
+	DOOB_GETPROCADDR(SetLatencySleepModeNV);
+	DOOB_GETPROCADDR(SetLocalDimmingAMD);
+	DOOB_GETPROCADDR(SetSwapchainPresentTimingQueueSizeEXT);
+	DOOB_GETPROCADDR(WaitForPresentKHR);
+	DOOB_GETPROCADDR(WaitForPresent2KHR);
 
 	PFN_vkVoidFunction result;
 	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, result, GetDeviceProcAddr, (device, pName));

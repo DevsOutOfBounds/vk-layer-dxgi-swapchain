@@ -1,5 +1,8 @@
 #pragma once
 
+#define VK_USE_PLATFORM_WIN32_KHR 1
+
+#include <assert.h>
 #include <string.h>
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
