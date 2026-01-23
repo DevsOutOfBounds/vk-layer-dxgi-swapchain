@@ -3,8 +3,8 @@
   "layer": {
     "name": "VK_LAYER_DOOB_dxgi_swapchain",
     "type": "GLOBAL",
-    "library_path": ".\\doob_vk_dxgi_swapchain.dll",
-    "api_version": "1.0.0",
+    "library_path": ".\\doob-vk-dxgi-swapchain.dll",
+    "api_version": "1.4.0",
     "implementation_version": "1",
     "description": "Replaces the Vulkan swapchain with the DXGI swapchain - https://www.devsoutofbounds.com/",
     "functions": {

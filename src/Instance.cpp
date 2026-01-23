@@ -16,48 +16,37 @@ struct DoobSwapchainHandle {
 	int unused_todo = 0;
 };
 
+static VkAllocationCallbacks GetFilledAllocationCallbacks(VkAllocationCallbacks callbacks) {
+	if (!callbacks.pfnAllocation) {
+		callbacks.pfnAllocation = [](
+			void* pUserData,
+			size_t                                      size,
+			size_t                                      alignment,
+			VkSystemAllocationScope                     allocationScope
+			) {return malloc(size); };
+	}
+	if (!callbacks.pfnReallocation) {
+		callbacks.pfnReallocation = [](
+			void* pUserData,
+			void* pOriginal,
+			size_t                                      size,
+			size_t                                      alignment,
+			VkSystemAllocationScope                     allocationScope
+			) {return realloc(pOriginal, size); };
+	}
+	if (!callbacks.pfnFree) {
+		callbacks.pfnFree = [](
+			void* pUserData,
+			void* pMemory
+			) {return free(pMemory); };
+	}
+}
+
 #define DOOB_CALL_DISPATCH_TABLE(table, object, retval, fn, params) do { PFN_vk##fn icd_function_call = nullptr; \
 { scoped_lock l(global_lock); icd_function_call = table[object].fn; } retval = icd_function_call params; } while (false) 
 
 #define DOOB_CALL_VOID_DISPATCH_TABLE(table, object, fn, params) do { PFN_vk##fn icd_function_call = nullptr; \
 { scoped_lock l(global_lock); icd_function_call = table[object].fn; } (void)icd_function_call params; } while (false) 
-
-VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL DOOB_GetInstanceProcAddr(VkInstance instance, const char* pName)
-{
-	// instance chain functions we intercept
-	DOOB_GETPROCADDR(GetInstanceProcAddr);
-	DOOB_GETPROCADDR(EnumerateInstanceLayerProperties);
-	DOOB_GETPROCADDR(CreateInstance);
-	DOOB_GETPROCADDR(CreateDevice);
-	DOOB_GETPROCADDR(DestroyInstance);
-
-	PFN_vkVoidFunction result;
-	DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, result, GetInstanceProcAddr, (instance, pName));
-	return result;
-}
-
-VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL DOOB_GetDeviceProcAddr(VkDevice device, const char* pName)
-{
-	// device chain functions we intercept
-	DOOB_GETPROCADDR(GetDeviceProcAddr);
-	DOOB_GETPROCADDR(EnumerateDeviceLayerProperties);
-	DOOB_GETPROCADDR(CreateDevice);
-	DOOB_GETPROCADDR(DestroyDevice);
-	DOOB_GETPROCADDR(GetDeviceQueue);
-	DOOB_GETPROCADDR(GetDeviceQueue2);
-	DOOB_GETPROCADDR(CreateSwapchainKHR);
-	DOOB_GETPROCADDR(GetSwapchainImagesKHR);
-	DOOB_GETPROCADDR(AcquireNextImage2KHR);
-	DOOB_GETPROCADDR(AcquireNextImageKHR);
-	DOOB_GETPROCADDR(DestroySwapchainKHR);
-	DOOB_GETPROCADDR(GetDeviceGroupPresentCapabilitiesKHR);
-	// DOOB_GETPROCADDR(GetPhysicalDevicePresentRectanglesKHR);
-	DOOB_GETPROCADDR(GetDeviceGroupSurfacePresentModesKHR);
-
-	PFN_vkVoidFunction result;
-	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, result, GetDeviceProcAddr, (device, pName));
-	return result;
-}
 
 static void GetLayerProperties(VkLayerProperties& properties) {
 	memset(properties.layerName, 0, sizeof(properties.layerName));
@@ -256,6 +245,9 @@ VK_LAYER_EXPORT void VKAPI_CALL DOOB_GetDeviceQueue(
 	uint32_t                                    queueIndex,
 	VkQueue* pQueue) {
 
+	printf("Intercept GetDeviceQueue\n");
+
+
 	g_device_dispatch[device].GetDeviceQueue(device, queueFamilyIndex, queueIndex, pQueue);
 	if (pQueue) {
 		scoped_lock l(global_lock);
@@ -360,14 +352,14 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetDeviceGroupSurfacePresentModesKHR(
 	return ret;
 }
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetPhysicalDevicePresentRectanglesKHR(
-	VkPhysicalDevice                            physicalDevice,
-	VkSurfaceKHR                                surface,
-	uint32_t* pRectCount,
-	VkRect2D* pRects) {
-
-	return VK_ERROR_INCOMPATIBLE_DRIVER;
-}
+//VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetPhysicalDevicePresentRectanglesKHR(
+//	VkPhysicalDevice                            physicalDevice,
+//	VkSurfaceKHR                                surface,
+//	uint32_t* pRectCount,
+//	VkRect2D* pRects) {
+//
+//	return VK_ERROR_INCOMPATIBLE_DRIVER;
+//}
 
 
 VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_AcquireNextImage2KHR(
@@ -378,5 +370,46 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_AcquireNextImage2KHR(
 	VkResult ret;
 	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, ret, AcquireNextImage2KHR, (device, pAcquireInfo, pImageIndex));
 	return ret;
+}
+
+
+// ==== INSTANCE CREATION ====
+
+
+VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL DOOB_GetInstanceProcAddr(VkInstance instance, const char* pName)
+{
+	// instance chain functions we intercept
+	DOOB_GETPROCADDR(GetInstanceProcAddr);
+	DOOB_GETPROCADDR(EnumerateInstanceLayerProperties);
+	DOOB_GETPROCADDR(CreateInstance);
+	DOOB_GETPROCADDR(CreateDevice);
+	DOOB_GETPROCADDR(DestroyInstance);
+
+	PFN_vkVoidFunction result;
+	DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, result, GetInstanceProcAddr, (instance, pName));
+	return result;
+}
+
+VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL DOOB_GetDeviceProcAddr(VkDevice device, const char* pName)
+{
+	// device chain functions we intercept
+	DOOB_GETPROCADDR(GetDeviceProcAddr);
+	DOOB_GETPROCADDR(EnumerateDeviceLayerProperties);
+	DOOB_GETPROCADDR(CreateDevice);
+	DOOB_GETPROCADDR(DestroyDevice);
+	DOOB_GETPROCADDR(GetDeviceQueue);
+	DOOB_GETPROCADDR(GetDeviceQueue2);
+	DOOB_GETPROCADDR(CreateSwapchainKHR);
+	DOOB_GETPROCADDR(GetSwapchainImagesKHR);
+	DOOB_GETPROCADDR(AcquireNextImage2KHR);
+	DOOB_GETPROCADDR(AcquireNextImageKHR);
+	DOOB_GETPROCADDR(DestroySwapchainKHR);
+	DOOB_GETPROCADDR(GetDeviceGroupPresentCapabilitiesKHR);
+	// DOOB_GETPROCADDR(GetPhysicalDevicePresentRectanglesKHR);
+	DOOB_GETPROCADDR(GetDeviceGroupSurfacePresentModesKHR);
+
+	PFN_vkVoidFunction result;
+	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, result, GetDeviceProcAddr, (device, pName));
+	return result;
 }
 

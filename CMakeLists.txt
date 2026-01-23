@@ -1,7 +1,7 @@
 ﻿cmake_minimum_required (VERSION 3.10)
 
 if(NOT WIN32)
-  message(FATAL_ERROR "This vulkan layer is only supported on Windows 7+ platforms!")
+  message(FATAL_ERROR "This vulkan layer is only supported on Windows platforms!")
 endif()
 
 
@@ -43,7 +43,7 @@ add_library (doob-vk-dxgi-swapchain SHARED
 "src/DxgiSwapchain.cpp")
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)
-  set_property(TARGET doob-vk-dxgi-swapchain PROPERTY CXX_STANDARD 14)
+  set_property(TARGET doob-vk-dxgi-swapchain PROPERTY CXX_STANDARD 20)
 endif()
 
 target_include_directories(doob-vk-dxgi-swapchain PRIVATE
