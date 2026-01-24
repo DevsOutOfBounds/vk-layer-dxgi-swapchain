@@ -300,6 +300,8 @@ VkResult VKAPI_CALL DOOB_CreateInstance(
         }
 
         if (!found) {
+            DOOB_print("[DOOB INFO] Missing extension %s!\n", ext.name);
+
             supports_dxgi_extension = false;
             break;
         }
@@ -321,6 +323,8 @@ VkResult VKAPI_CALL DOOB_CreateInstance(
     ASSIGN_DISPATCH(EnumeratePhysicalDeviceGroups);
     ASSIGN_DISPATCH(GetPhysicalDeviceProperties2KHR);
     ASSIGN_DISPATCH(GetPhysicalDeviceProperties2);
+    ASSIGN_DISPATCH(GetPhysicalDeviceFeatures2KHR);
+    ASSIGN_DISPATCH(GetPhysicalDeviceFeatures2);
     ASSIGN_DISPATCH(CreateInstance);
     ASSIGN_DISPATCH(CreateDevice);
     ASSIGN_DISPATCH(DestroyInstance);
@@ -425,6 +429,44 @@ void VKAPI_CALL DOOB_GetPhysicalDeviceProperties2KHR(
             dxgi_device_properties = (VkPhysicalDeviceDxgiPropertiesDOOB*)dxgi_device_properties->pNext;
         }
         if (dxgi_device_properties) {
+            // TODO: do we need this?
+            
+            //VkPhysicalDeviceIDProperties id_properties{
+            //    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
+            //};
+            //VkPhysicalDeviceProperties2 properties2{
+            //    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+            //    .pNext = &id_properties,
+            //};
+            //DOOB_CALL_VOID_DISPATCH_TABLE(g_instance_dispatch, instance, GetPhysicalDeviceProperties2KHR, (physicalDevice, &properties2));
+        }
+    }
+    DOOB_CALL_VOID_DISPATCH_TABLE(g_instance_dispatch, instance, GetPhysicalDeviceProperties2KHR, (physicalDevice, pProperties));
+}
+#define DOOB_GetPhysicalDeviceProperties2 DOOB_GetPhysicalDeviceProperties2KHR
+
+
+// Use KHR to ensure it absolutely exists if using an old version with extensions enabled!
+void VKAPI_CALL DOOB_GetPhysicalDeviceFeatures2KHR(
+    VkPhysicalDevice                            physicalDevice,
+    VkPhysicalDeviceFeatures2* pFeatures) {
+
+    VkInstance instance = DOOB_GetInstanceFromPhysicalDevice(physicalDevice);
+    if (instance == VK_NULL_HANDLE) {
+        return;
+    }
+    bool supports_dxgi_doob = false;
+    {
+        scoped_lock l(global_lock);
+        supports_dxgi_doob = g_instance_config[instance].supports_dxgi_ext;
+    }
+
+    if (supports_dxgi_doob) {
+        VkPhysicalDeviceDxgiFeaturesDOOB* dxgi_device_features = (VkPhysicalDeviceDxgiFeaturesDOOB*)pFeatures->pNext;
+        while (dxgi_device_features && (dxgi_device_features->sType != VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DXGI_FEATURES_DOOB)) {
+            dxgi_device_features = (VkPhysicalDeviceDxgiFeaturesDOOB*)dxgi_device_features->pNext;
+        }
+        if (dxgi_device_features) {
             VkPhysicalDeviceIDProperties id_properties{
                 .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
             };
@@ -436,16 +478,19 @@ void VKAPI_CALL DOOB_GetPhysicalDeviceProperties2KHR(
             if (id_properties.deviceLUIDValid == VK_TRUE || properties2.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
                 // maybe check with DXGI if the device exists
                 // However if CPU device, then just default to WARP
-                dxgi_device_properties->dxgiSwapchain = VK_TRUE;
+                dxgi_device_features->dxgiSwapchain = VK_TRUE;
+                // check what D3D device is supported, tbh should be d3d12 always
+                dxgi_device_features->dxgiVersion = VK_DXGI_DEVICE_VERSION_D3D12_DOOB;
             }
             else {
-                dxgi_device_properties->dxgiSwapchain = VK_FALSE;
+                dxgi_device_features->dxgiSwapchain = VK_FALSE;
             }
         }
     }
-    DOOB_CALL_VOID_DISPATCH_TABLE(g_instance_dispatch, instance, GetPhysicalDeviceProperties2KHR, (physicalDevice, pProperties));
+    DOOB_CALL_VOID_DISPATCH_TABLE(g_instance_dispatch, instance, GetPhysicalDeviceFeatures2KHR, (physicalDevice, pFeatures));
 }
-#define DOOB_GetPhysicalDeviceProperties2 DOOB_GetPhysicalDeviceProperties2KHR
+#define DOOB_GetPhysicalDeviceFeatures2 DOOB_GetPhysicalDeviceFeatures2KHR
+
 
 static const VkExtensionProperties g_doob_extension_info = {
     VK_DOOB_DXGI_SWAPCHAIN_EXTENSION_NAME,
@@ -460,14 +505,15 @@ VkResult VKAPI_CALL DOOB_EnumerateDeviceExtensionProperties(
 {
     VkInstance instance = DOOB_GetInstanceFromPhysicalDevice(physicalDevice);
     bool extension_supported_on_inst_level = false;
+    uint32_t using_api_version = 0;
     if (instance == VK_NULL_HANDLE) {
         return VK_ERROR_UNKNOWN;
     }
     {
         scoped_lock l(global_lock);
-        extension_supported_on_inst_level= g_instance_config[instance].supports_dxgi_ext;
+        extension_supported_on_inst_level = g_instance_config[instance].supports_dxgi_ext;
+        using_api_version = g_instance_config[instance].vk_api_version;
     }
-
     if (pLayerName != NULL && strcmp(pLayerName, VK_LAYER_DOOB_DXGI_SWAPCHAIN_NAME) == 0) {
         bool has_dependencies = extension_supported_on_inst_level;
         if (has_dependencies) {
@@ -482,6 +528,7 @@ VkResult VKAPI_CALL DOOB_EnumerateDeviceExtensionProperties(
             // CHECK DEPENDENCIES
 
             for (const auto& ext : REQUIRED_DEVICE_EXTS) {
+                if (using_api_version >= ext.promoted_to_vk) continue;
                 bool found = false;
                 for (const auto& d_ext : driver_exts) {
                     if (strcmp(d_ext.extensionName, ext.name) == 0) {
@@ -490,6 +537,7 @@ VkResult VKAPI_CALL DOOB_EnumerateDeviceExtensionProperties(
                     }
                 }
                 if (!found) {
+                    DOOB_print("[DOOB INFO] Missing extension %s!\n", ext.name);
                     has_dependencies = false;
                     break;
                 }
@@ -532,6 +580,7 @@ VkResult VKAPI_CALL DOOB_EnumerateDeviceExtensionProperties(
     bool has_dependencies = extension_supported_on_inst_level;
     if (has_dependencies) {
         for (const auto& ext : REQUIRED_DEVICE_EXTS) {
+            if (using_api_version >= ext.promoted_to_vk) continue;
             bool found = false;
             for (const auto& d_ext : driver_exts) {
                 if (strcmp(d_ext.extensionName, ext.name) == 0) {
@@ -626,15 +675,20 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
     VkDeviceCreateInfo device_create_info_copy = *pCreateInfo;
 
     bool is_dxgi_enabled = false;
-    bool is_dxgi_supported = false;
+    bool is_dxgi_supported = supports_dxgi_ext;
 
     // Check if the extension is supported!
-    uint32_t pcount = 0;
-    DOOB_EnumerateDeviceExtensionProperties(physicalDevice, VK_DOOB_DXGI_SWAPCHAIN_EXTENSION_NAME, &pcount, NULL);
-    if (pcount > 0) {
-        is_dxgi_supported = true;
+    if (is_dxgi_supported) {
+        uint32_t pcount = 0;
+        VkResult result = DOOB_EnumerateDeviceExtensionProperties(physicalDevice, VK_LAYER_DOOB_DXGI_SWAPCHAIN_NAME, &pcount, NULL);
+        if (result != VK_SUCCESS) {
+            DOOB_print("something went very wrong");
+            return VK_ERROR_UNKNOWN;
+        }
+        if (pcount == 0) {
+            is_dxgi_supported = false;
+        }
     }
-
     DoobSettings global_dxgi_layer_settings = DOOB_LoadSettings();
 
     VkPhysicalDeviceDxgiFeaturesDOOB* dxgi_device_features = (VkPhysicalDeviceDxgiFeaturesDOOB*)pCreateInfo->pNext;
@@ -696,7 +750,7 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
 
     // ENFORCE DEPENDENCY
     if (is_dxgi_enabled && !dependency_enabled) {
-        DOOB_print("[DOOB ERROR] " VK_DOOB_DXGI_SWAPCHAIN_EXTENSION_NAME " requires the following extensions:");
+        DOOB_print("[DOOB ERROR] " VK_DOOB_DXGI_SWAPCHAIN_EXTENSION_NAME " requires the following device extensions:");
         for (const auto& ext : REQUIRED_DEVICE_EXTS) {
             if (enabled_api_version >= ext.promoted_to_vk) continue; // No enabling needed
             DOOB_print(" %s", ext.name);
@@ -718,35 +772,35 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
     // Set the DXGI features
     VkPhysicalDeviceDxgiFeaturesDOOB local_dxgi_features = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DXGI_FEATURES_DOOB,
-        .enableDxgiSwapchain = VK_FALSE,
+        .dxgiSwapchain = VK_FALSE,
         .dxgiVersion = VK_DXGI_DEVICE_VERSION_AUTO_DOOB,
     };
-    
+
     if (is_dxgi_enabled) {
         if (global_dxgi_layer_settings.force_enable_dxgi) {
             if (dxgi_device_features) {
                 local_dxgi_features = *dxgi_device_features;
             }
-            local_dxgi_features.enableDxgiSwapchain = VK_TRUE;
+            local_dxgi_features.dxgiSwapchain = VK_TRUE;
             if (global_dxgi_layer_settings.force_dxgi_version) {
                 local_dxgi_features.dxgiVersion = global_dxgi_layer_settings.force_dxgi_version_value;
             }
         }
-        dxgi_swapchain_enabled = local_dxgi_features.enableDxgiSwapchain;
+        dxgi_swapchain_enabled = local_dxgi_features.dxgiSwapchain;
 
         if (dxgi_swapchain_enabled) {
-            // vkGetPhysicalDeviceProperties2 is supported on this level
-            VkPhysicalDeviceDxgiPropertiesDOOB dxgi_properties{
-                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DXGI_PROPERTIES_DOOB
+            // vkGetPhysicalDeviceFeatures2 is supported on this level
+            VkPhysicalDeviceDxgiFeaturesDOOB dxgi_features{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DXGI_FEATURES_DOOB
             };
 
-            VkPhysicalDeviceProperties2 properties2{
-                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-                .pNext = &dxgi_properties,
+            VkPhysicalDeviceFeatures2 properties2{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                .pNext = &dxgi_features,
             };
-            DOOB_GetPhysicalDeviceProperties2(physicalDevice, &properties2);
+            DOOB_GetPhysicalDeviceFeatures2(physicalDevice, &properties2);
 
-            if (dxgi_properties.dxgiSwapchain == VK_FALSE) {
+            if (dxgi_features.dxgiSwapchain == VK_FALSE) {
                 // DXGI swapchain somehow not supported
                 return VK_ERROR_FEATURE_NOT_PRESENT;
             }
@@ -1211,6 +1265,8 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL DOOB_GetInstanceProcAddr(VkInstanc
     DOOB_GETPROCADDR(EnumeratePhysicalDeviceGroupsKHR);
     DOOB_GETPROCADDR(GetPhysicalDeviceProperties2);
     DOOB_GETPROCADDR(GetPhysicalDeviceProperties2KHR);
+    DOOB_GETPROCADDR(GetPhysicalDeviceFeatures2KHR);
+    DOOB_GETPROCADDR(GetPhysicalDeviceFeatures2);
     DOOB_GETPROCADDR(CreateInstance);
     DOOB_GETPROCADDR(CreateDevice);
     DOOB_GETPROCADDR(DestroyInstance);

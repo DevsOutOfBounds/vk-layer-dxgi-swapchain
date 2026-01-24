@@ -64,8 +64,8 @@ STRUCTS = [
         "name": "VkPhysicalDeviceDxgiPropertiesDOOB",
         "members": [
             ("VkStructureType", "sType"),
-            ("const void*", "pNext"),
-            ("VkBool32", "dxgiSwapchain")
+            ("const void*", "pNext")
+            # TODO: do we need this?
         ]
     },
     {
@@ -73,7 +73,7 @@ STRUCTS = [
         "members": [
             ("VkStructureType", "sType"),
             ("const void*", "pNext"),
-            ("VkBool32", "enableDxgiSwapchain"),
+            ("VkBool32", "dxgiSwapchain"),
             ("VkDxgiDeviceVersionDOOB", "dxgiVersion")
         ]
     },

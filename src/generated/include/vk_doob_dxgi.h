@@ -30,13 +30,12 @@ enum VkDxgiDeviceVersionDOOB {
 typedef struct VkPhysicalDeviceDxgiPropertiesDOOB {
     VkStructureType                     sType;
     const void*                         pNext;
-    VkBool32                            dxgiSwapchain;
 } VkPhysicalDeviceDxgiPropertiesDOOB;
 
 typedef struct VkPhysicalDeviceDxgiFeaturesDOOB {
     VkStructureType                     sType;
     const void*                         pNext;
-    VkBool32                            enableDxgiSwapchain;
+    VkBool32                            dxgiSwapchain;
     VkDxgiDeviceVersionDOOB             dxgiVersion;
 } VkPhysicalDeviceDxgiFeaturesDOOB;
 
