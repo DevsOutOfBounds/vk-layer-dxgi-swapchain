@@ -77,7 +77,7 @@ static TNonDispatchableHandle DOOB_MakeHandle(uint32_t id, uint32_t counter) {
 }
 template <typename TNonDispatchableHandle>
 static uint32_t DOOB_GetCounterAndVerify(uint32_t target_id, TNonDispatchableHandle handle) {
-    uint64_t p = *(uint64_t*)(handle);
+    uint64_t p = *(uint64_t*)(&handle);
     uint32_t id = (uint32_t)(p >> 32);
     uint32_t counter = (uint32_t)(p & 0xFFFFFFFF);
     if (id != target_id) {
@@ -109,7 +109,7 @@ static TObject* DOOB_AllocCountedHandle(std::vector<TObject*>& data_array, uint3
             break;
         }
     }
-    if (*out_counter > data_array.size()) {
+    if (*out_counter >= data_array.size()) {
         data_array.push_back({});
     }
     TObject* obj = (TObject*)alloc->pfnAllocation(NULL, sizeof(TObject), 1, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
@@ -984,15 +984,23 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
 
     printf("[DOOB] Your swapchain is out of bounds\n");
 
+    VkIcdSurfaceWin32* win32_surface = (VkIcdSurfaceWin32*)pCreateInfo->surface;
+    if (win32_surface->base.platform != VK_ICD_WSI_PLATFORM_WIN32) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    VkDxgiSwapchainCreateInfoDOOB local_dxgi_info = {
+        .sType = VK_STRUCTURE_TYPE_DXGI_SWAPCHAIN_CREATE_INFO_DOOB,
+        .swapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD,
+    };
+
     VkDxgiSwapchainCreateInfoDOOB* dxgi_info = (VkDxgiSwapchainCreateInfoDOOB*)pCreateInfo->pNext;
     while (dxgi_info && (dxgi_info->sType != VK_STRUCTURE_TYPE_DXGI_SWAPCHAIN_CREATE_INFO_DOOB))
     {
         dxgi_info = (VkDxgiSwapchainCreateInfoDOOB*)dxgi_info->pNext;
     }
-    if (!dxgi_info) {
-        VkResult ret;
-        DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, ret, CreateSwapchainKHR, (device, pCreateInfo, pAllocator, pSwapchain));
-        return ret;
+    if (dxgi_info) {
+        local_dxgi_info = *dxgi_info;
     }
 
     VkAllocationCallbacks alloc = DOOB_GetFilledAllocationCallbacks(pAllocator);
@@ -1003,7 +1011,10 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     }
 
-    // create swapchain here
+    // create swapchain here 
+    //  
+    DOOB_print("HINSTANCE handle = %p\n", win32_surface->hinstance);
+    DOOB_print("HWND handle = %p\n", win32_surface->hwnd);
 
     *pSwapchain = DOOB_MakeHandle<VkSwapchainKHR>(DOOB_SWAPCHAIN_HANDLE_ID, swapchain_handle);
 
@@ -1018,7 +1029,7 @@ VkResult VKAPI_CALL DOOB_CreateSharedSwapchainsKHR(
 
     // TODO
 
-    return VK_INCOMPLETE;
+    return VK_ERROR_UNKNOWN;
 }
 
 void VKAPI_CALL DOOB_DestroySwapchainKHR(
@@ -1054,7 +1065,7 @@ VkResult VKAPI_CALL DOOB_GetSwapchainImagesKHR(
 
     // swapchain_obj->...
 
-    return VK_INCOMPLETE;
+    return VK_ERROR_UNKNOWN;
 }
 
 VkResult VKAPI_CALL DOOB_GetSwapchainStatusKHR(
@@ -1063,7 +1074,7 @@ VkResult VKAPI_CALL DOOB_GetSwapchainStatusKHR(
 
     // TODO
 
-    return VK_INCOMPLETE;
+    return VK_ERROR_UNKNOWN;
 }
 
 VkResult VKAPI_CALL DOOB_AcquireFullScreenExclusiveModeEXT(
@@ -1072,7 +1083,7 @@ VkResult VKAPI_CALL DOOB_AcquireFullScreenExclusiveModeEXT(
 
     // TODO
 
-    return VK_INCOMPLETE;
+    return VK_ERROR_UNKNOWN;
 }
 
 VkResult VKAPI_CALL DOOB_AcquireNextImageKHR(
@@ -1085,7 +1096,7 @@ VkResult VKAPI_CALL DOOB_AcquireNextImageKHR(
 
     // TODO
 
-    return VK_INCOMPLETE;
+    return VK_ERROR_UNKNOWN;
 }
 VkResult VKAPI_CALL DOOB_AcquireNextImage2KHR(
     VkDevice                                    device,
@@ -1094,7 +1105,7 @@ VkResult VKAPI_CALL DOOB_AcquireNextImage2KHR(
 
     // TODO
 
-    return VK_INCOMPLETE;
+    return VK_ERROR_UNKNOWN;
 }
 VkResult VKAPI_CALL DOOB_GetPastPresentationTimingGOOGLE(
     VkDevice                                    device,
@@ -1104,7 +1115,7 @@ VkResult VKAPI_CALL DOOB_GetPastPresentationTimingGOOGLE(
 
     // TODO
 
-    return VK_INCOMPLETE;
+    return VK_ERROR_UNKNOWN;
 }
 VkResult VKAPI_CALL DOOB_GetRefreshCycleDurationGOOGLE(
     VkDevice                                    device,
@@ -1113,7 +1124,7 @@ VkResult VKAPI_CALL DOOB_GetRefreshCycleDurationGOOGLE(
 
     // TODO
 
-    return VK_INCOMPLETE;
+    return VK_ERROR_UNKNOWN;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL DOOB_GetSwapchainCounterEXT(
@@ -1124,7 +1135,7 @@ VKAPI_ATTR VkResult VKAPI_CALL DOOB_GetSwapchainCounterEXT(
 
     // TODO
 
-    return VK_INCOMPLETE;
+    return VK_ERROR_UNKNOWN;
 }
 
 VkResult VKAPI_CALL DOOB_GetSwapchainTimeDomainPropertiesEXT(
@@ -1135,7 +1146,7 @@ VkResult VKAPI_CALL DOOB_GetSwapchainTimeDomainPropertiesEXT(
 
     // TODO
 
-    return VK_INCOMPLETE;
+    return VK_ERROR_UNKNOWN;
 }
 
 VkResult VKAPI_CALL DOOB_GetSwapchainTimingPropertiesEXT(
@@ -1146,7 +1157,7 @@ VkResult VKAPI_CALL DOOB_GetSwapchainTimingPropertiesEXT(
 
     // TODO
 
-    return VK_INCOMPLETE;
+    return VK_ERROR_UNKNOWN;
 }
 
 VkResult VKAPI_CALL DOOB_LatencySleepNV(
@@ -1156,7 +1167,7 @@ VkResult VKAPI_CALL DOOB_LatencySleepNV(
 
     // TODO
 
-    return VK_INCOMPLETE;
+    return VK_ERROR_UNKNOWN;
 }
 VkResult VKAPI_CALL DOOB_ReleaseFullScreenExclusiveModeEXT(
     VkDevice                                    device,
@@ -1164,7 +1175,7 @@ VkResult VKAPI_CALL DOOB_ReleaseFullScreenExclusiveModeEXT(
 
     // TODO
 
-    return VK_INCOMPLETE;
+    return VK_ERROR_UNKNOWN;
 }
 void VKAPI_CALL DOOB_SetHdrMetadataEXT(
     VkDevice                                    device,
@@ -1190,7 +1201,7 @@ VkResult VKAPI_CALL DOOB_SetLatencySleepModeNV(
 
     // TODO
 
-    return VK_INCOMPLETE;
+    return VK_ERROR_UNKNOWN;
 }
 
 void VKAPI_CALL DOOB_SetLocalDimmingAMD(
@@ -1208,7 +1219,7 @@ VkResult VKAPI_CALL DOOB_SetSwapchainPresentTimingQueueSizeEXT(
 
     // TODO
 
-    return VK_INCOMPLETE;
+    return VK_ERROR_UNKNOWN;
 }
 
 VkResult VKAPI_CALL DOOB_WaitForPresentKHR(
@@ -1219,7 +1230,7 @@ VkResult VKAPI_CALL DOOB_WaitForPresentKHR(
 
     // TODO
 
-    return VK_INCOMPLETE;
+    return VK_ERROR_UNKNOWN;
 }
 
 VkResult VKAPI_CALL DOOB_WaitForPresent2KHR(
@@ -1229,7 +1240,7 @@ VkResult VKAPI_CALL DOOB_WaitForPresent2KHR(
 
     // TODO
 
-    return VK_INCOMPLETE;
+    return VK_ERROR_UNKNOWN;
 }
 
 // ==== OUR CUSTOM FUNCTIONS ====

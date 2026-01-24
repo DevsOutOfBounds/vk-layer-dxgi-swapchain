@@ -11,6 +11,7 @@
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
 #include <vulkan/vulkan_win32.h>
+#include <vulkan/vk_icd.h>
 #include <vulkan/vk_layer_dispatch_table.h>
 
 
