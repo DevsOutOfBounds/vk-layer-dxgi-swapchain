@@ -6,6 +6,53 @@ from common import FULL_VERSION_STR
 from common import IMPL_VERSION_INT
 from common import SPEC_VERSION_INT
 
+LAYER_SETTINGS = [
+    {
+        "key": "enable_dxgi_interop",
+        "env": "VK_DOOB_FORCE_ENABLE_DXGI_INTEROP",
+        "label": "Force Enable DXGI Interop",
+        "description": "If enabled, ALL swapchains will be backed by DXGI surfaces.",
+        "type": "BOOL",
+        "default": "true",
+        "view": "STANDARD" # Options: STANDARD, ADVANCED, HIDDEN
+    },
+    {
+        "key": "force_dxgi_version",
+        "env": "VK_DOOB_FORCE_DXGI_VERSION",
+        "label": "Force DXGI Version",
+        "description": "Force a specific DXGI factory version.",
+        "type": "ENUM",
+        "default": "default",
+        "flags": [
+            {
+                "key": "default",
+                "label": "Default",
+                "description": "Let the application decide."
+            },
+            {
+                "key": "d3d11",
+                "label": "Direct3D 11",
+                "description": "Force D3D11 / DXGI 1.2"
+            },
+            {
+                "key": "d3d12",
+                "label": "Direct3D 12",
+                "description": "Force D3D12 / DXGI 1.4"
+            }
+        ],
+        "view": "STANDARD"
+    },
+    {
+        "key": "log_file_path",
+        "env": "VK_DOOB_LOG_FILE",
+        "label": "Log File Path",
+        "description": "Where to save the internal layer logs.",
+        "type": "SAVE_FILE", # Creates a file picker in vkconfig
+        "default": "./doob_layer_log.txt",
+        "view": "ADVANCED"
+    }
+]
+
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output_json', type=str)
@@ -35,7 +82,10 @@ def generate_json(output_json, library_name):
                         "vkGetDxgiSwapchainHandleDOOB"
                     ]
                 }
-            ]
+            ],
+            "features": {
+                "settings": LAYER_SETTINGS
+            }
         }
     }
     fullpath = os.path.abspath(output_json)

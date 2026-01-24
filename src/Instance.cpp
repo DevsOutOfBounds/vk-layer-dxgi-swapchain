@@ -12,9 +12,14 @@
 std::mutex global_lock;
 typedef std::lock_guard<std::mutex> scoped_lock;
 
-
 // ==== Dispatch table ====
 
+struct DoobSettings {
+    bool force_enable_dxgi;
+    bool force_dxgi_version;
+    VkDxgiDeviceVersionDOOB force_dxgi_version_value;
+    std::string log_file;
+};
 struct DoobDeviceConfig {
     bool enabled_dxgi_swapchain;
     DOOB_D3D11FactoryInfo factory_info;
@@ -135,6 +140,37 @@ static VkAllocationCallbacks DOOB_GetFilledAllocationCallbacks(VkAllocationCallb
     }
     return callbacks;
 }
+
+static DoobSettings DOOB_LoadSettings() {
+    DoobSettings s;
+
+    const char* env_enable = std::getenv("VK_DOOB_FORCE_ENABLE_DXGI_INTEROP");
+    if (env_enable && strcmp(env_enable, "true") == 0) {
+        s.force_enable_dxgi = true;
+    }
+    else {
+        s.force_enable_dxgi = false; // Default
+    }
+
+    const char* env_ver = std::getenv("VK_DOOB_FORCE_DXGI_VERSION");
+    if (env_ver && strcmp(env_ver, "d3d11")) {
+        s.force_dxgi_version = true;
+        s.force_dxgi_version_value = VK_DXGI_DEVICE_VERSION_D3D11_DOOB;
+    }
+    else if (env_ver && strcmp(env_ver, "d3d12")) {
+        s.force_dxgi_version = true;
+        s.force_dxgi_version_value = VK_DXGI_DEVICE_VERSION_D3D12_DOOB;
+    }
+    else {
+        s.force_dxgi_version = false;
+    }
+
+    const char* env_log = std::getenv("VK_DOOB_LOG_FILE");
+    s.log_file = env_log ? env_log : "";
+
+    return s;
+}
+
 
 VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_EnumerateInstanceLayerProperties(
     uint32_t* pPropertyCount,
@@ -384,14 +420,27 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateDevice(
     if (!is_doob_enabled) {
         return ret; // Not enabled!
     }
+    DoobSettings global_dxgi_layer_settings = DOOB_LoadSettings();
+
     VkDxgiDeviceFeaturesDOOB* dxgi_device_features = (VkDxgiDeviceFeaturesDOOB*)pCreateInfo->pNext;
     while (dxgi_device_features && (dxgi_device_features->sType != VK_STRUCTURE_TYPE_DXGI_DEVICE_FEATURES_DOOB))
     {
         dxgi_device_features = (VkDxgiDeviceFeaturesDOOB*)dxgi_device_features->pNext;
     }
 
-    if (dxgi_device_features) {
-        // use this to create the dxgi context
+    if (dxgi_device_features || global_dxgi_layer_settings.force_enable_dxgi) {
+        VkDxgiDeviceFeaturesDOOB local_dxgi_features = {
+            .sType = VK_STRUCTURE_TYPE_DXGI_DEVICE_FEATURES_DOOB,
+            .dxgiVersion = VK_DXGI_DEVICE_VERSION_AUTO_DOOB,
+        };
+        if (dxgi_device_features) {
+            local_dxgi_features = *dxgi_device_features;
+        }
+        if (global_dxgi_layer_settings.force_dxgi_version) {
+            local_dxgi_features.dxgiVersion = global_dxgi_layer_settings.force_dxgi_version_value;
+        }
+
+        // use local_dxgi_features to create the dxgi context
     }
 
 #define ASSIGN_DISPATCH(fn) dispatchTable.fn = (PFN_vk##fn)gdpa(*pDevice, "vk"#fn) 
