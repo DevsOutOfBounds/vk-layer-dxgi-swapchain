@@ -338,7 +338,6 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_EnumerateDeviceExtensionProperties(
     uint32_t count = 0;
     VkResult res;
     DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, res, EnumerateDeviceExtensionProperties, (physicalDevice, NULL, &count, NULL));
-    return res;
     if (res != VK_SUCCESS) return res;
 
     // Calculate Total (Driver + Us)
