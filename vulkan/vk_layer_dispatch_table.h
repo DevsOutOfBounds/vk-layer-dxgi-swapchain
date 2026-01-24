@@ -224,8 +224,8 @@ typedef struct VkLayerInstanceDispatchTable_ {
     PFN_vkDestroyDebugUtilsMessengerEXT DestroyDebugUtilsMessengerEXT;
     PFN_vkSubmitDebugUtilsMessageEXT SubmitDebugUtilsMessageEXT;
 
-    //// ---- VK_EXT_descriptor_heap extension commands
-    //PFN_vkGetPhysicalDeviceDescriptorSizeEXT GetPhysicalDeviceDescriptorSizeEXT;
+    // ---- VK_EXT_descriptor_heap extension commands
+    PFN_vkGetPhysicalDeviceDescriptorSizeEXT GetPhysicalDeviceDescriptorSizeEXT;
 
     // ---- VK_EXT_sample_locations extension commands
     PFN_vkGetPhysicalDeviceMultisamplePropertiesEXT GetPhysicalDeviceMultisamplePropertiesEXT;
@@ -781,7 +781,7 @@ typedef struct VkLayerDispatchTable_ {
     PFN_vkGetImageViewHandleNVX GetImageViewHandleNVX;
     PFN_vkGetImageViewHandle64NVX GetImageViewHandle64NVX;
     PFN_vkGetImageViewAddressNVX GetImageViewAddressNVX;
-    //PFN_vkGetDeviceCombinedImageSamplerIndexNVX GetDeviceCombinedImageSamplerIndexNVX;
+    PFN_vkGetDeviceCombinedImageSamplerIndexNVX GetDeviceCombinedImageSamplerIndexNVX;
 
     // ---- VK_AMD_draw_indirect_count extension commands
     PFN_vkCmdDrawIndirectCountAMD CmdDrawIndirectCountAMD;
@@ -862,7 +862,7 @@ typedef struct VkLayerDispatchTable_ {
 #endif // VK_ENABLE_BETA_EXTENSIONS
 
     // ---- VK_EXT_descriptor_heap extension commands
-  /*  PFN_vkWriteSamplerDescriptorsEXT WriteSamplerDescriptorsEXT;
+    PFN_vkWriteSamplerDescriptorsEXT WriteSamplerDescriptorsEXT;
     PFN_vkWriteResourceDescriptorsEXT WriteResourceDescriptorsEXT;
     PFN_vkCmdBindSamplerHeapEXT CmdBindSamplerHeapEXT;
     PFN_vkCmdBindResourceHeapEXT CmdBindResourceHeapEXT;
@@ -870,7 +870,7 @@ typedef struct VkLayerDispatchTable_ {
     PFN_vkGetImageOpaqueCaptureDataEXT GetImageOpaqueCaptureDataEXT;
     PFN_vkRegisterCustomBorderColorEXT RegisterCustomBorderColorEXT;
     PFN_vkUnregisterCustomBorderColorEXT UnregisterCustomBorderColorEXT;
-    PFN_vkGetTensorOpaqueCaptureDataARM GetTensorOpaqueCaptureDataARM;*/
+    PFN_vkGetTensorOpaqueCaptureDataARM GetTensorOpaqueCaptureDataARM;
 
     // ---- VK_EXT_sample_locations extension commands
     PFN_vkCmdSetSampleLocationsEXT CmdSetSampleLocationsEXT;
@@ -1318,7 +1318,7 @@ typedef struct VkLayerDispatchTable_ {
     PFN_vkCmdBeginCustomResolveEXT CmdBeginCustomResolveEXT;
 
     // ---- VK_NV_compute_occupancy_priority extension commands
-    // PFN_vkCmdSetComputeOccupancyPriorityNV CmdSetComputeOccupancyPriorityNV;
+    PFN_vkCmdSetComputeOccupancyPriorityNV CmdSetComputeOccupancyPriorityNV;
 
     // ---- VK_KHR_acceleration_structure extension commands
     PFN_vkCreateAccelerationStructureKHR CreateAccelerationStructureKHR;
