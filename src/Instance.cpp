@@ -416,32 +416,6 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateDevice(
     if (ret != VK_SUCCESS) {
         return ret;
     }
-    if (!is_doob_enabled) {
-        return ret; // Not enabled!
-    }
-    DoobSettings global_dxgi_layer_settings = DOOB_LoadSettings();
-
-    VkDxgiDeviceFeaturesDOOB* dxgi_device_features = (VkDxgiDeviceFeaturesDOOB*)pCreateInfo->pNext;
-    while (dxgi_device_features && (dxgi_device_features->sType != VK_STRUCTURE_TYPE_DXGI_DEVICE_FEATURES_DOOB))
-    {
-        dxgi_device_features = (VkDxgiDeviceFeaturesDOOB*)dxgi_device_features->pNext;
-    }
-
-    if (dxgi_device_features || global_dxgi_layer_settings.force_enable_dxgi) {
-        VkDxgiDeviceFeaturesDOOB local_dxgi_features = {
-            .sType = VK_STRUCTURE_TYPE_DXGI_DEVICE_FEATURES_DOOB,
-            .dxgiVersion = VK_DXGI_DEVICE_VERSION_AUTO_DOOB,
-        };
-        if (dxgi_device_features) {
-            local_dxgi_features = *dxgi_device_features;
-        }
-        if (global_dxgi_layer_settings.force_dxgi_version) {
-            local_dxgi_features.dxgiVersion = global_dxgi_layer_settings.force_dxgi_version_value;
-        }
-
-        // use local_dxgi_features to create the dxgi context
-    }
-
 #define ASSIGN_DISPATCH(fn) dispatchTable.fn = (PFN_vk##fn)gdpa(*pDevice, "vk"#fn) 
 
     // fetch our own dispatch table for the functions we need, into the next layer
@@ -481,6 +455,34 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateDevice(
         scoped_lock l(global_lock);
         g_device_dispatch[*pDevice] = dispatchTable;
     }
+
+    if (!is_doob_enabled) {
+        return VK_SUCCESS; // Not enabled!
+    }
+    DoobSettings global_dxgi_layer_settings = DOOB_LoadSettings();
+
+    VkDxgiDeviceFeaturesDOOB* dxgi_device_features = (VkDxgiDeviceFeaturesDOOB*)pCreateInfo->pNext;
+    while (dxgi_device_features && (dxgi_device_features->sType != VK_STRUCTURE_TYPE_DXGI_DEVICE_FEATURES_DOOB))
+    {
+        dxgi_device_features = (VkDxgiDeviceFeaturesDOOB*)dxgi_device_features->pNext;
+    }
+
+    if (dxgi_device_features || global_dxgi_layer_settings.force_enable_dxgi) {
+        VkDxgiDeviceFeaturesDOOB local_dxgi_features = {
+            .sType = VK_STRUCTURE_TYPE_DXGI_DEVICE_FEATURES_DOOB,
+            .dxgiVersion = VK_DXGI_DEVICE_VERSION_AUTO_DOOB,
+        };
+        if (dxgi_device_features) {
+            local_dxgi_features = *dxgi_device_features;
+        }
+        if (global_dxgi_layer_settings.force_dxgi_version) {
+            local_dxgi_features.dxgiVersion = global_dxgi_layer_settings.force_dxgi_version_value;
+        }
+
+        // use local_dxgi_features to create the dxgi context
+    }
+
+
     return VK_SUCCESS;
 }
 
