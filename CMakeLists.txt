@@ -40,6 +40,11 @@ endif()
 target_include_directories(doob-vk-dxgi-swapchain PRIVATE
 	${CMAKE_CURRENT_SOURCE_DIR}
 )
+if(MSVC)
+  target_compile_options(doob-vk-dxgi-swapchain PRIVATE /W4 /WX /wd4514 /wd4820 /wd4127 /wd4710 /wd4711 /wd4577 /wd4996 /wd5311 /wd4458 /wd4505 /wd4324 /wd4100)
+else()
+  target_compile_options(doob-vk-dxgi-swapchain PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
 
 add_custom_command(
     TARGET doob-vk-dxgi-swapchain POST_BUILD

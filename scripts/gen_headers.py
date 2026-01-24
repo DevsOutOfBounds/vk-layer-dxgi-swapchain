@@ -30,8 +30,9 @@ DEFINES = {
     "VK_LAYER_DOOB_API_VERSION_MINOR": CONFIG['VERSION_MINOR'],
     "VK_LAYER_DOOB_API_VERSION_PATCH": CONFIG['VERSION_PATCH'],
 
-    "VK_STRUCTURE_TYPE_DXGI_DEVICE_FEATURES_DOOB": "((VkStructureType)(2123157880))",
-    "VK_STRUCTURE_TYPE_DXGI_SWAPCHAIN_CREATE_INFO_DOOB": "((VkStructureType)(2123157881))"
+    "VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DXGI_PROPERTIES_DOOB": "((VkStructureType)(2123157880))",
+    "VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DXGI_FEATURES_DOOB": "((VkStructureType)(2123157881))",
+    "VK_STRUCTURE_TYPE_DXGI_SWAPCHAIN_CREATE_INFO_DOOB": "((VkStructureType)(2123157882))"
 }
 
 FUNCTIONS = [
@@ -60,10 +61,19 @@ ENUMS = [
 
 STRUCTS = [
     {
-        "name": "VkDxgiDeviceFeaturesDOOB",
+        "name": "VkPhysicalDeviceDxgiPropertiesDOOB",
         "members": [
             ("VkStructureType", "sType"),
             ("const void*", "pNext"),
+            ("VkBool32", "dxgiSwapchain")
+        ]
+    },
+    {
+        "name": "VkPhysicalDeviceDxgiFeaturesDOOB",
+        "members": [
+            ("VkStructureType", "sType"),
+            ("const void*", "pNext"),
+            ("VkBool32", "enableDxgiSwapchain"),
             ("VkDxgiDeviceVersionDOOB", "dxgiVersion")
         ]
     },

@@ -7,10 +7,28 @@
 
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 std::mutex global_lock;
 typedef std::lock_guard<std::mutex> scoped_lock;
+
+
+struct DoobRequiredExt {
+    const char* name;
+    uint32_t promoted_to_vk; // ~0U if not promoted at all, works with if checks
+};
+static DoobRequiredExt REQUIRED_INSTANCE_EXTS[] = {
+    { VK_KHR_SURFACE_EXTENSION_NAME, ~0U  },
+    { VK_KHR_WIN32_SURFACE_EXTENSION_NAME, ~0U  },
+    { VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME, VK_VERSION_1_1 },
+    { VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME, VK_VERSION_1_1 },
+};
+
+static DoobRequiredExt REQUIRED_DEVICE_EXTS[] = {
+    { VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME, ~0U },
+};
+
 
 // ==== Dispatch table ====
 
@@ -21,11 +39,14 @@ struct DoobSettings {
     std::string log_file;
 };
 struct DoobDeviceConfig {
-    bool enabled_dxgi_swapchain;
+    bool dxgi_swapchain_extension_enabled;
+    bool dxgi_swapchain_feature_enabled;
     DOOB_D3D11FactoryInfo factory_info;
 };
 struct DoobInstanceConfig {
-    std::vector<VkPhysicalDevice> physical_devices;
+    std::unordered_set<VkPhysicalDevice> physical_devices;
+    uint32_t vk_api_version;
+    bool supports_dxgi_ext;
 };
 std::unordered_map<VkInstance, VkLayerInstanceDispatchTable> g_instance_dispatch;
 std::unordered_map<VkInstance, DoobInstanceConfig> g_instance_config;
@@ -46,6 +67,7 @@ std::vector<DOOB_DxgiSwapchain*> g_dxgi_swapchains = {};
 #define DOOB_INVALID_COUNTER_HANDLE (~0U)
 #define DOOB_SWAPCHAIN_HANDLE_ID (0x1020'0000)
 
+#define DOOB_print(...) printf(__VA_ARGS__)
 
 template <typename TNonDispatchableHandle>
 static TNonDispatchableHandle DOOB_MakeHandle(uint32_t id, uint32_t counter) {
@@ -61,6 +83,7 @@ static uint32_t DOOB_GetCounterAndVerify(uint32_t target_id, TNonDispatchableHan
     if (id != target_id) {
         return DOOB_INVALID_COUNTER_HANDLE;
     }
+    return counter;
 }
 template <typename TObject, typename TNonDispatchableHandle>
 static TObject* DOOB_GetObjectIfExists(std::vector<TObject*>& data_array, uint32_t target_id, TNonDispatchableHandle handle) {
@@ -106,15 +129,15 @@ static void DOOB_ReleaseCountedHandle(std::vector<TObject*>& data_array, uint32_
 static VkInstance DOOB_GetInstanceFromPhysicalDevice(VkPhysicalDevice physical_device) {
     scoped_lock l(global_lock);
     for (const auto& kv : g_instance_config) {
-        const auto& physical_device_list = kv.second.physical_devices;
-        if (std::find(physical_device_list.begin(), physical_device_list.end(), physical_device) != physical_device_list.end()) {
+        if (kv.second.physical_devices.contains(physical_device)) {
             return kv.first;
         }
     }
     return VK_NULL_HANDLE;
 }
 
-static VkAllocationCallbacks DOOB_GetFilledAllocationCallbacks(VkAllocationCallbacks callbacks) {
+static VkAllocationCallbacks DOOB_GetFilledAllocationCallbacks(const VkAllocationCallbacks* p_callbacks) {
+    VkAllocationCallbacks callbacks = p_callbacks ? *p_callbacks : VkAllocationCallbacks{};
     if (!callbacks.pfnAllocation) {
         callbacks.pfnAllocation = [](
             void* pUserData,
@@ -153,11 +176,11 @@ static DoobSettings DOOB_LoadSettings() {
     }
 
     const char* env_ver = std::getenv("VK_DOOB_FORCE_DXGI_VERSION");
-    if (env_ver && strcmp(env_ver, "d3d11")) {
+    if (env_ver && strcmp(env_ver, "d3d11") == 0) {
         s.force_dxgi_version = true;
         s.force_dxgi_version_value = VK_DXGI_DEVICE_VERSION_D3D11_DOOB;
     }
-    else if (env_ver && strcmp(env_ver, "d3d12")) {
+    else if (env_ver && strcmp(env_ver, "d3d12") == 0) {
         s.force_dxgi_version = true;
         s.force_dxgi_version_value = VK_DXGI_DEVICE_VERSION_D3D12_DOOB;
     }
@@ -172,7 +195,7 @@ static DoobSettings DOOB_LoadSettings() {
 }
 
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_EnumerateInstanceLayerProperties(
+VkResult VKAPI_CALL DOOB_EnumerateInstanceLayerProperties(
     uint32_t* pPropertyCount,
     VkLayerProperties* pProperties) {
     if (pPropertyCount == NULL) {
@@ -197,18 +220,22 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_EnumerateInstanceLayerProperties(
     return VK_SUCCESS;
 }
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_EnumerateDeviceLayerProperties(
+VkResult VKAPI_CALL DOOB_EnumerateDeviceLayerProperties(
     VkPhysicalDevice                            physicalDevice,
     uint32_t* pPropertyCount,
     VkLayerProperties* pProperties) {
     return DOOB_EnumerateInstanceLayerProperties(pPropertyCount, pProperties);
 }
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateInstance(
+VkResult VKAPI_CALL DOOB_CreateInstance(
     const VkInstanceCreateInfo* pCreateInfo,
     const VkAllocationCallbacks* pAllocator,
     VkInstance* pInstance)
 {
+    uint32_t enabled_api_version = VK_API_VERSION_1_0; // Default fallback
+    if (pCreateInfo->pApplicationInfo) {
+        enabled_api_version = pCreateInfo->pApplicationInfo->apiVersion;
+    }
     VkLayerInstanceCreateInfo* layerCreateInfo = (VkLayerInstanceCreateInfo*)pCreateInfo->pNext;
 
     // step through the chain of pNext until we get to the link info
@@ -230,7 +257,55 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateInstance(
 
     PFN_vkCreateInstance createFunc = (PFN_vkCreateInstance)gpa(VK_NULL_HANDLE, "vkCreateInstance");
 
-    VkResult ret = createFunc(pCreateInfo, pAllocator, pInstance);
+    // Enable instance extensions!
+
+    VkInstanceCreateInfo instance_create_info_copy = *pCreateInfo;
+
+    DoobSettings global_dxgi_layer_settings = DOOB_LoadSettings();
+    bool supports_dxgi_extension = true;
+
+    std::vector<const char*> enabled_extensions(pCreateInfo->enabledExtensionCount);
+    for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
+        enabled_extensions[i] = pCreateInfo->ppEnabledExtensionNames[i];
+    }
+    // Is the layer enabling it and the application didnt? Enable all required extensions!
+    if (global_dxgi_layer_settings.force_enable_dxgi) {
+        for (const auto& ext : REQUIRED_INSTANCE_EXTS) {
+            if (enabled_api_version >= ext.promoted_to_vk) continue; // No enabling needed
+            bool already_enabled = false;
+            for (const char* enabled_ext : enabled_extensions) {
+                if (strcmp(enabled_ext, ext.name) == 0) {
+                    already_enabled = true;
+                    break;
+                }
+            }
+            if (!already_enabled) {
+                DOOB_print("[DOOB] WARNING: Implicitly enabling extension %s\n", ext.name);
+                enabled_extensions.push_back(ext.name);
+            }
+        }
+    }
+    // Update extensions!
+    instance_create_info_copy.ppEnabledExtensionNames = enabled_extensions.data();
+    instance_create_info_copy.enabledExtensionCount = (uint32_t)enabled_extensions.size();
+
+    for (const auto& ext : REQUIRED_INSTANCE_EXTS) {
+        if (enabled_api_version >= ext.promoted_to_vk) continue; // No enabling needed
+        bool found = false;
+        for (const char* enabled_ext : enabled_extensions) {
+            if (strcmp(enabled_ext, ext.name) == 0) {
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) {
+            supports_dxgi_extension = false;
+            break;
+        }
+    }
+
+    VkResult ret = createFunc(&instance_create_info_copy, pAllocator, pInstance);
     if (ret != VK_SUCCESS) {
         return ret;
     }
@@ -242,6 +317,10 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateInstance(
     ASSIGN_DISPATCH(EnumerateInstanceLayerProperties);
     ASSIGN_DISPATCH(EnumerateDeviceExtensionProperties);
     ASSIGN_DISPATCH(EnumeratePhysicalDevices);
+    ASSIGN_DISPATCH(EnumeratePhysicalDeviceGroupsKHR);
+    ASSIGN_DISPATCH(EnumeratePhysicalDeviceGroups);
+    ASSIGN_DISPATCH(GetPhysicalDeviceProperties2KHR);
+    ASSIGN_DISPATCH(GetPhysicalDeviceProperties2);
     ASSIGN_DISPATCH(CreateInstance);
     ASSIGN_DISPATCH(CreateDevice);
     ASSIGN_DISPATCH(DestroyInstance);
@@ -250,17 +329,20 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateInstance(
 #undef ASSIGN_DISPATCH
 
     // fetch our own dispatch table for the functions we need, into the next layer
+
     {
         scoped_lock l(global_lock);
         g_instance_dispatch[*pInstance] = dispatchTable;
+        g_instance_config[*pInstance].vk_api_version = pCreateInfo->pApplicationInfo->apiVersion;
+        g_instance_config[*pInstance].supports_dxgi_ext = supports_dxgi_extension;
     }
     return VK_SUCCESS;
 }
 
-VK_LAYER_EXPORT void VKAPI_CALL DOOB_DestroyInstance(
+void VKAPI_CALL DOOB_DestroyInstance(
     VkInstance                                  instance,
     const VkAllocationCallbacks* pAllocator) {
-    PFN_vkDestroyInstance call;
+    PFN_vkDestroyInstance call = NULL;
     {
         scoped_lock l(global_lock);
         auto it = g_instance_dispatch.find(instance);
@@ -273,11 +355,12 @@ VK_LAYER_EXPORT void VKAPI_CALL DOOB_DestroyInstance(
             g_instance_config.erase(it2);
         }
     }
-    call(instance, pAllocator);
-
+    if (call != NULL) {
+        call(instance, pAllocator);
+    }
 }
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_EnumeratePhysicalDevices(
+VkResult VKAPI_CALL DOOB_EnumeratePhysicalDevices(
     VkInstance                                  instance,
     uint32_t* pPhysicalDeviceCount,
     VkPhysicalDevice* pPhysicalDevices) {
@@ -288,42 +371,142 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_EnumeratePhysicalDevices(
     }
     if (pPhysicalDeviceCount && pPhysicalDevices) {
         scoped_lock l(global_lock);
-        std::vector<VkPhysicalDevice>& physical_device_array = g_instance_config[instance].physical_devices;
-        physical_device_array.resize(*pPhysicalDeviceCount);
+        auto& physical_device_set = g_instance_config[instance].physical_devices;
         for (uint32_t i = 0; i < *pPhysicalDeviceCount; ++i) {
-            physical_device_array[i] = pPhysicalDevices[i];
+            physical_device_set.emplace(pPhysicalDevices[i]);
         }
     }
+    return VK_SUCCESS;
 }
+
+// Use KHR to ensure it absolutely exists if using an old version with extensions enabled!
+VkResult VKAPI_CALL DOOB_EnumeratePhysicalDeviceGroupsKHR(
+    VkInstance instance,
+    uint32_t* pPhysicalDeviceGroupCount,
+    VkPhysicalDeviceGroupProperties* pPhysicalDeviceGroupProperties)
+{
+    VkResult res;
+    DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, res, EnumeratePhysicalDeviceGroupsKHR, (instance, pPhysicalDeviceGroupCount, pPhysicalDeviceGroupProperties));
+
+    if (res == VK_SUCCESS && pPhysicalDeviceGroupProperties) {
+        scoped_lock l(global_lock);
+        std::unordered_set<VkPhysicalDevice>& physical_device_array = g_instance_config[instance].physical_devices;
+
+        // Add all found devices to our map
+        for (uint32_t i = 0; i < *pPhysicalDeviceGroupCount; i++) {
+            for (uint32_t j = 0; j < pPhysicalDeviceGroupProperties[i].physicalDeviceCount; j++) {
+                VkPhysicalDevice handle = pPhysicalDeviceGroupProperties[i].physicalDevices[j];
+                physical_device_array.emplace(handle);
+            }
+        }
+    }
+    return res;
+}
+#define DOOB_EnumeratePhysicalDeviceGroups DOOB_EnumeratePhysicalDeviceGroupsKHR
+
+// Use KHR to ensure it absolutely exists if using an old version with extensions enabled!
+void VKAPI_CALL DOOB_GetPhysicalDeviceProperties2KHR(
+    VkPhysicalDevice                            physicalDevice,
+    VkPhysicalDeviceProperties2* pProperties) {
+
+    VkInstance instance = DOOB_GetInstanceFromPhysicalDevice(physicalDevice);
+    if (instance == VK_NULL_HANDLE) {
+        return;
+    }
+    bool supports_dxgi_doob = false;
+    {
+        scoped_lock l(global_lock);
+        supports_dxgi_doob = g_instance_config[instance].supports_dxgi_ext;
+    }
+
+    if (supports_dxgi_doob) {
+        VkPhysicalDeviceDxgiPropertiesDOOB* dxgi_device_properties = (VkPhysicalDeviceDxgiPropertiesDOOB*)pProperties->pNext;
+        while (dxgi_device_properties && (dxgi_device_properties->sType != VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DXGI_PROPERTIES_DOOB)) {
+            dxgi_device_properties = (VkPhysicalDeviceDxgiPropertiesDOOB*)dxgi_device_properties->pNext;
+        }
+        if (dxgi_device_properties) {
+            VkPhysicalDeviceIDProperties id_properties{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
+            };
+            VkPhysicalDeviceProperties2 properties2{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                .pNext = &id_properties,
+            };
+            DOOB_CALL_VOID_DISPATCH_TABLE(g_instance_dispatch, instance, GetPhysicalDeviceProperties2KHR, (physicalDevice, &properties2));
+            if (id_properties.deviceLUIDValid == VK_TRUE || properties2.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
+                // maybe check with DXGI if the device exists
+                // However if CPU device, then just default to WARP
+                dxgi_device_properties->dxgiSwapchain = VK_TRUE;
+            }
+            else {
+                dxgi_device_properties->dxgiSwapchain = VK_FALSE;
+            }
+        }
+    }
+    DOOB_CALL_VOID_DISPATCH_TABLE(g_instance_dispatch, instance, GetPhysicalDeviceProperties2KHR, (physicalDevice, pProperties));
+}
+#define DOOB_GetPhysicalDeviceProperties2 DOOB_GetPhysicalDeviceProperties2KHR
 
 static const VkExtensionProperties g_doob_extension_info = {
     VK_DOOB_DXGI_SWAPCHAIN_EXTENSION_NAME,
     VK_DOOB_DXGI_SWAPCHAIN_SPEC_VERSION
 };
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_EnumerateDeviceExtensionProperties(
+VkResult VKAPI_CALL DOOB_EnumerateDeviceExtensionProperties(
     VkPhysicalDevice                            physicalDevice,
     const char* pLayerName,
     uint32_t* pPropertyCount,
     VkExtensionProperties* pProperties)
 {
-    if (pLayerName && strcmp(pLayerName, VK_LAYER_DOOB_DXGI_SWAPCHAIN_NAME) == 0) {
-        if (pPropertyCount && !pProperties) {
-            *pPropertyCount = 1;
+    VkInstance instance = DOOB_GetInstanceFromPhysicalDevice(physicalDevice);
+    bool extension_supported_on_inst_level = false;
+    if (instance == VK_NULL_HANDLE) {
+        return VK_ERROR_UNKNOWN;
+    }
+    {
+        scoped_lock l(global_lock);
+        extension_supported_on_inst_level= g_instance_config[instance].supports_dxgi_ext;
+    }
+
+    if (pLayerName != NULL && strcmp(pLayerName, VK_LAYER_DOOB_DXGI_SWAPCHAIN_NAME) == 0) {
+        bool has_dependencies = extension_supported_on_inst_level;
+        if (has_dependencies) {
+            uint32_t count;
+            VkResult res;
+            DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, res, EnumerateDeviceExtensionProperties, (physicalDevice, NULL, &count, NULL));
+            if (res != VK_SUCCESS) return res;
+            std::vector<VkExtensionProperties> driver_exts(count);
+            DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, res, EnumerateDeviceExtensionProperties, (physicalDevice, NULL, &count, driver_exts.data()));
+            if (res != VK_SUCCESS) return res;
+
+            // CHECK DEPENDENCIES
+
+            for (const auto& ext : REQUIRED_DEVICE_EXTS) {
+                bool found = false;
+                for (const auto& d_ext : driver_exts) {
+                    if (strcmp(d_ext.extensionName, ext.name) == 0) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    has_dependencies = false;
+                    break;
+                }
+            }
+        }
+        if (pPropertyCount && pProperties == NULL) {
+            *pPropertyCount = has_dependencies ? 1 : 0;
             return VK_SUCCESS;
         }
-        if (pProperties) {
-            if (*pPropertyCount < 1) return VK_INCOMPLETE;
+        if (pProperties && has_dependencies) {
+            if (pPropertyCount == NULL || *pPropertyCount < 1) return VK_INCOMPLETE;
             pProperties[0] = g_doob_extension_info;
             *pPropertyCount = 1;
         }
         return VK_SUCCESS;
     }
 
-    VkInstance instance = DOOB_GetInstanceFromPhysicalDevice(physicalDevice);
-    if (instance == VK_NULL_HANDLE) {
-        return VK_ERROR_UNKNOWN;
-    }
     // If pLayerName is NOT NULL and NOT us, pass it down (it's for another layer)
     if (pLayerName) {
         VkResult ret;
@@ -335,13 +518,36 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_EnumerateDeviceExtensionProperties(
     // We must fetch the driver's list, then add ours to it.
 
     // Get Driver Count
-    uint32_t count = 0;
+    uint32_t driver_count = 0;
     VkResult res;
-    DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, res, EnumerateDeviceExtensionProperties, (physicalDevice, NULL, &count, NULL));
+    DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, res, EnumerateDeviceExtensionProperties, (physicalDevice, NULL, &driver_count, NULL));
     if (res != VK_SUCCESS) return res;
 
-    // Calculate Total (Driver + Us)
-    uint32_t total_count = count + 1;
+    std::vector<VkExtensionProperties> driver_exts(driver_count);
+    DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, res, EnumerateDeviceExtensionProperties, (physicalDevice, NULL, &driver_count, driver_exts.data()));
+    if (res != VK_SUCCESS) return res;
+
+    // CHECK DEPENDENCIES
+
+    bool has_dependencies = extension_supported_on_inst_level;
+    if (has_dependencies) {
+        for (const auto& ext : REQUIRED_DEVICE_EXTS) {
+            bool found = false;
+            for (const auto& d_ext : driver_exts) {
+                if (strcmp(d_ext.extensionName, ext.name) == 0) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                has_dependencies = false;
+                break;
+            }
+        }
+    }
+    // Only show OUR extension if dependency exists
+    uint32_t our_count = has_dependencies ? 1 : 0;
+    uint32_t total_count = driver_count + our_count;
 
     // If App is just querying count
     if (!pProperties) {
@@ -351,15 +557,20 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_EnumerateDeviceExtensionProperties(
 
     // If App provided buffer, calculate how many to write
     uint32_t copy_count = *pPropertyCount;
-    if (copy_count > count) copy_count = count; // Copy max what the driver has
+    if (copy_count > driver_count) copy_count = driver_count; // Copy max what the driver has
 
-    // Fetch Driver Extensions
-    DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, res, EnumerateDeviceExtensionProperties, (physicalDevice, NULL, &copy_count, pProperties));
-    if (res != VK_SUCCESS && res != VK_INCOMPLETE) return res;
+    // Fetch Driver Extensions (we already queried them so we can just store it now)
+    for (uint32_t i = 0; i < copy_count; ++i) {
+        pProperties[i] = driver_exts[i];
+    }
 
+    // If we dont have the required dependencies, exit out, no more extensions to write
+    if (!has_dependencies) {
+        return VK_SUCCESS;
+    }
     // Append Our Extension (if there is space)
     if (*pPropertyCount >= total_count) {
-        pProperties[count] = g_doob_extension_info;
+        pProperties[driver_count] = g_doob_extension_info;
         *pPropertyCount = total_count;
         return VK_SUCCESS;
     }
@@ -369,13 +580,27 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_EnumerateDeviceExtensionProperties(
     }
 }
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateDevice(
+VkResult VKAPI_CALL DOOB_CreateDevice(
     VkPhysicalDevice                            physicalDevice,
     const VkDeviceCreateInfo* pCreateInfo,
     const VkAllocationCallbacks* pAllocator,
     VkDevice* pDevice)
 {
     VkLayerDeviceCreateInfo* layerCreateInfo = (VkLayerDeviceCreateInfo*)pCreateInfo->pNext;
+
+
+    VkInstance instance;
+    uint32_t enabled_api_version = 0;
+    bool supports_dxgi_ext = false;
+    {
+        instance = DOOB_GetInstanceFromPhysicalDevice(physicalDevice);
+        if (instance == VK_NULL_HANDLE) {
+            return VK_ERROR_UNKNOWN;
+        }
+        scoped_lock l(global_lock);
+        enabled_api_version = g_instance_config[instance].vk_api_version;
+        supports_dxgi_ext = g_instance_config[instance].supports_dxgi_ext;
+    }
 
     // step through the chain of pNext until we get to the link info
     while (layerCreateInfo && (layerCreateInfo->sType != VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO ||
@@ -397,23 +622,140 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateDevice(
 
     PFN_vkCreateDevice createFunc = (PFN_vkCreateDevice)gipa(VK_NULL_HANDLE, "vkCreateDevice");
 
-    VkResult ret = createFunc(physicalDevice, pCreateInfo, pAllocator, pDevice);
-    if (ret != VK_SUCCESS) {
-        return ret;
+    // Inject DOOB DXGI if the layer is overriding !
+    VkDeviceCreateInfo device_create_info_copy = *pCreateInfo;
+
+    bool is_dxgi_enabled = false;
+    bool is_dxgi_supported = false;
+
+    // Check if the extension is supported!
+    uint32_t pcount = 0;
+    DOOB_EnumerateDeviceExtensionProperties(physicalDevice, VK_DOOB_DXGI_SWAPCHAIN_EXTENSION_NAME, &pcount, NULL);
+    if (pcount > 0) {
+        is_dxgi_supported = true;
     }
 
-    bool is_doob_enabled = false;
-    if (pCreateInfo->ppEnabledExtensionNames) {
-        for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++) {
-            if (strcmp(pCreateInfo->ppEnabledExtensionNames[i], VK_DOOB_DXGI_SWAPCHAIN_EXTENSION_NAME) == 0) {
-                is_doob_enabled = true;
-                break;
+    DoobSettings global_dxgi_layer_settings = DOOB_LoadSettings();
+
+    VkPhysicalDeviceDxgiFeaturesDOOB* dxgi_device_features = (VkPhysicalDeviceDxgiFeaturesDOOB*)pCreateInfo->pNext;
+    while (dxgi_device_features && (dxgi_device_features->sType != VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DXGI_FEATURES_DOOB)) {
+        dxgi_device_features = (VkPhysicalDeviceDxgiFeaturesDOOB*)dxgi_device_features->pNext;
+    }
+
+    std::vector<const char*> enabled_extensions(pCreateInfo->enabledExtensionCount);
+    for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
+        enabled_extensions[i] = pCreateInfo->ppEnabledExtensionNames[i];
+    }
+    // Is the layer enabling it and the application didnt? Enable all required extensions!
+    if (global_dxgi_layer_settings.force_enable_dxgi && !dxgi_device_features) {
+        for (const auto& ext : REQUIRED_DEVICE_EXTS) {
+            if (enabled_api_version >= ext.promoted_to_vk) continue; // No enabling needed
+            bool already_enabled = false;
+            for (const char* enabled_ext : enabled_extensions) {
+                if (strcmp(enabled_ext, ext.name) == 0) {
+                    already_enabled = true;
+                    break;
+                }
+            }
+            if (!already_enabled) {
+                DOOB_print("[DOOB] WARNING: Implicitly enabling extension %s\n", ext.name);
+                enabled_extensions.push_back(ext.name);
             }
         }
     }
-    {
-        scoped_lock l(global_lock);
-        g_device_config[*pDevice].enabled_dxgi_swapchain = is_doob_enabled;
+    // Update extensions!
+    device_create_info_copy.ppEnabledExtensionNames = enabled_extensions.data();
+    device_create_info_copy.enabledExtensionCount = (uint32_t)enabled_extensions.size();
+
+    // Check for dependencies!
+    bool dependency_enabled = supports_dxgi_ext;
+    if (device_create_info_copy.ppEnabledExtensionNames) {
+        for (uint32_t i = 0; i < device_create_info_copy.enabledExtensionCount; i++) {
+            if (strcmp(device_create_info_copy.ppEnabledExtensionNames[i], VK_DOOB_DXGI_SWAPCHAIN_EXTENSION_NAME) == 0) {
+                is_dxgi_enabled = true;
+                break;
+            }
+        }
+        if (dependency_enabled) {
+            for (const auto& ext : REQUIRED_DEVICE_EXTS) {
+                if (enabled_api_version >= ext.promoted_to_vk) continue; // No enabling needed
+                bool found = false;
+                for (uint32_t i = 0; i < device_create_info_copy.enabledExtensionCount; ++i) {
+                    if (strcmp(device_create_info_copy.ppEnabledExtensionNames[i], ext.name) == 0) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    dependency_enabled = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    // ENFORCE DEPENDENCY
+    if (is_dxgi_enabled && !dependency_enabled) {
+        DOOB_print("[DOOB ERROR] " VK_DOOB_DXGI_SWAPCHAIN_EXTENSION_NAME " requires the following extensions:");
+        for (const auto& ext : REQUIRED_DEVICE_EXTS) {
+            if (enabled_api_version >= ext.promoted_to_vk) continue; // No enabling needed
+            DOOB_print(" %s", ext.name);
+        }
+        for (const auto& ext : REQUIRED_INSTANCE_EXTS) {
+            if (enabled_api_version >= ext.promoted_to_vk) continue; // No enabling needed
+            DOOB_print(" %s", ext.name);
+        }
+        DOOB_print("\n");
+        return VK_ERROR_EXTENSION_NOT_PRESENT; // Fail the creation
+    }
+    // ENFORCE SUPPORT
+    if (!is_dxgi_supported && is_dxgi_enabled) {
+        DOOB_print("[DOOB ERROR] " VK_DOOB_DXGI_SWAPCHAIN_EXTENSION_NAME " is not supported!\n");
+        return VK_ERROR_EXTENSION_NOT_PRESENT; // Fail the creation
+    }
+
+    bool dxgi_swapchain_enabled = false;
+    // Set the DXGI features
+    VkPhysicalDeviceDxgiFeaturesDOOB local_dxgi_features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DXGI_FEATURES_DOOB,
+        .enableDxgiSwapchain = VK_FALSE,
+        .dxgiVersion = VK_DXGI_DEVICE_VERSION_AUTO_DOOB,
+    };
+    
+    if (is_dxgi_enabled) {
+        if (global_dxgi_layer_settings.force_enable_dxgi) {
+            if (dxgi_device_features) {
+                local_dxgi_features = *dxgi_device_features;
+            }
+            local_dxgi_features.enableDxgiSwapchain = VK_TRUE;
+            if (global_dxgi_layer_settings.force_dxgi_version) {
+                local_dxgi_features.dxgiVersion = global_dxgi_layer_settings.force_dxgi_version_value;
+            }
+        }
+        dxgi_swapchain_enabled = local_dxgi_features.enableDxgiSwapchain;
+
+        if (dxgi_swapchain_enabled) {
+            // vkGetPhysicalDeviceProperties2 is supported on this level
+            VkPhysicalDeviceDxgiPropertiesDOOB dxgi_properties{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DXGI_PROPERTIES_DOOB
+            };
+
+            VkPhysicalDeviceProperties2 properties2{
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                .pNext = &dxgi_properties,
+            };
+            DOOB_GetPhysicalDeviceProperties2(physicalDevice, &properties2);
+
+            if (dxgi_properties.dxgiSwapchain == VK_FALSE) {
+                // DXGI swapchain somehow not supported
+                return VK_ERROR_FEATURE_NOT_PRESENT;
+            }
+        }
+    }
+
+    VkResult ret = createFunc(physicalDevice, &device_create_info_copy, pAllocator, pDevice);
+    if (ret != VK_SUCCESS) {
+        return ret;
     }
 
 #define ASSIGN_DISPATCH(fn) dispatchTable.fn = (PFN_vk##fn)gdpa(*pDevice, "vk"#fn) 
@@ -456,40 +798,35 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateDevice(
         g_device_dispatch[*pDevice] = dispatchTable;
     }
 
-    if (!is_doob_enabled) {
-        return VK_SUCCESS; // Not enabled!
-    }
-    DoobSettings global_dxgi_layer_settings = DOOB_LoadSettings();
-
-    VkDxgiDeviceFeaturesDOOB* dxgi_device_features = (VkDxgiDeviceFeaturesDOOB*)pCreateInfo->pNext;
-    while (dxgi_device_features && (dxgi_device_features->sType != VK_STRUCTURE_TYPE_DXGI_DEVICE_FEATURES_DOOB))
-    {
-        dxgi_device_features = (VkDxgiDeviceFeaturesDOOB*)dxgi_device_features->pNext;
-    }
-
-    if (dxgi_device_features || global_dxgi_layer_settings.force_enable_dxgi) {
-        VkDxgiDeviceFeaturesDOOB local_dxgi_features = {
-            .sType = VK_STRUCTURE_TYPE_DXGI_DEVICE_FEATURES_DOOB,
-            .dxgiVersion = VK_DXGI_DEVICE_VERSION_AUTO_DOOB,
+    if (dxgi_swapchain_enabled) {
+        VkPhysicalDeviceIDProperties id_properties = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES
         };
-        if (dxgi_device_features) {
-            local_dxgi_features = *dxgi_device_features;
-        }
-        if (global_dxgi_layer_settings.force_dxgi_version) {
-            local_dxgi_features.dxgiVersion = global_dxgi_layer_settings.force_dxgi_version_value;
-        }
 
-        // use local_dxgi_features to create the dxgi context
+        VkPhysicalDeviceProperties2 properties2{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+            .pNext = &id_properties,
+        };
+        DOOB_GetPhysicalDeviceProperties2(physicalDevice, &properties2);
+        // If this is a CPU device, use the WARP driver!!
+        // Otherwise, the LUID is valid, otherwise the dxgiSwapchain property is set to VK_FALSE!
+        // 
+        // TODO: Create DXGI factory and device
+        // Make sure to return the appropriate errors if error occur!
+
     }
-
-
+    {
+        scoped_lock l(global_lock);
+        g_device_config[*pDevice].dxgi_swapchain_feature_enabled = dxgi_swapchain_enabled;
+        g_device_config[*pDevice].dxgi_swapchain_extension_enabled = is_dxgi_enabled;
+    }
     return VK_SUCCESS;
 }
 
-VK_LAYER_EXPORT void VKAPI_CALL DOOB_DestroyDevice(
+void VKAPI_CALL DOOB_DestroyDevice(
     VkDevice                                    device,
     const VkAllocationCallbacks* pAllocator) {
-    PFN_vkDestroyDevice call;
+    PFN_vkDestroyDevice call = NULL;
     {
         scoped_lock l(global_lock);
         auto it = g_device_dispatch.find(device);
@@ -511,17 +848,17 @@ VK_LAYER_EXPORT void VKAPI_CALL DOOB_DestroyDevice(
             g_device_config.erase(it2);
         }
     }
-    call(device, pAllocator);
+    if (call != NULL) {
+        call(device, pAllocator);
+    }
 }
 
 
-VK_LAYER_EXPORT void VKAPI_CALL DOOB_GetDeviceQueue(
+void VKAPI_CALL DOOB_GetDeviceQueue(
     VkDevice                                    device,
     uint32_t                                    queueFamilyIndex,
     uint32_t                                    queueIndex,
     VkQueue* pQueue) {
-
-    printf("TEST REMOVE ME Intercept GetDeviceQueue\n");
 
     g_device_dispatch[device].GetDeviceQueue(device, queueFamilyIndex, queueIndex, pQueue);
     if (pQueue) {
@@ -530,7 +867,7 @@ VK_LAYER_EXPORT void VKAPI_CALL DOOB_GetDeviceQueue(
     }
 }
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetDeviceGroupPresentCapabilitiesKHR(
+VkResult VKAPI_CALL DOOB_GetDeviceGroupPresentCapabilitiesKHR(
     VkDevice                                    device,
     VkDeviceGroupPresentCapabilitiesKHR* pDeviceGroupPresentCapabilities) {
 
@@ -539,7 +876,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetDeviceGroupPresentCapabilitiesKHR(
     return VK_INCOMPLETE;
 }
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetPhysicalDevicePresentRectanglesKHR(
+VkResult VKAPI_CALL DOOB_GetPhysicalDevicePresentRectanglesKHR(
     VkPhysicalDevice                            physicalDevice,
     VkSurfaceKHR                                surface,
     uint32_t* pRectCount,
@@ -549,7 +886,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetPhysicalDevicePresentRectanglesKHR(
 
     return VK_INCOMPLETE;
 }
-VK_LAYER_EXPORT void VKAPI_CALL DOOB_GetDeviceQueue2(
+void VKAPI_CALL DOOB_GetDeviceQueue2(
     VkDevice                                    device,
     const VkDeviceQueueInfo2* pQueueInfo,
     VkQueue* pQueue) {
@@ -561,7 +898,7 @@ VK_LAYER_EXPORT void VKAPI_CALL DOOB_GetDeviceQueue2(
     }
 }
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_QueuePresentKHR(
+VkResult VKAPI_CALL DOOB_QueuePresentKHR(
     VkQueue                                     queue,
     const VkPresentInfoKHR* pPresentInfo) {
 
@@ -572,24 +909,6 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_QueuePresentKHR(
     }
     assert(device != VK_NULL_HANDLE);
 
-    bool has_doob_swapchain = false;
-    for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
-        if (DOOB_GetCounterAndVerify(DOOB_SWAPCHAIN_HANDLE_ID, pPresentInfo->pSwapchains[i]) != DOOB_INVALID_COUNTER_HANDLE) {
-            has_doob_swapchain = true;
-            break;
-        }
-    }
-
-    if (!has_doob_swapchain) {
-        VkResult ret;
-        DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, ret, QueuePresentKHR, (queue, pPresentInfo));
-        return ret;
-    }
-
-
-    std::vector<VkSwapchainKHR> non_doob_swapchains = {};
-    std::vector<uint32_t> non_doob_swapchain_img_indices = {};
-    std::vector<uint32_t> non_doob_swapchain_reverse_indices = {}; // maps array index back to input index (important for writing VK_RESULT)
     for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
         VkSwapchainKHR sc = pPresentInfo->pSwapchains[i];
         DOOB_DxgiSwapchain* doob_sc = DOOB_GetObjectIfExists(g_dxgi_swapchains, DOOB_SWAPCHAIN_HANDLE_ID, sc);
@@ -599,44 +918,11 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_QueuePresentKHR(
             // NOTE: how to deal with the pWaitSemaphores?
             // pPresentInfo->pResults[i] = ...
         }
-        else {
-            non_doob_swapchains.push_back(sc);
-            non_doob_swapchain_img_indices.push_back(pPresentInfo->pImageIndices[i]);
-            non_doob_swapchain_reverse_indices.push_back(i);
-        }
     }
-
-    if (non_doob_swapchains.size() > 0) {
-        std::vector<VkResult> results{};
-
-        VkPresentInfoKHR temp_present_info{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
-        // FIXME: for certain pNext chains the indices might not match up anymore!!!
-        temp_present_info.pNext = pPresentInfo->pNext;
-        temp_present_info.waitSemaphoreCount = pPresentInfo->waitSemaphoreCount;
-        temp_present_info.pWaitSemaphores = pPresentInfo->pWaitSemaphores;
-        temp_present_info.swapchainCount = (uint32_t)non_doob_swapchains.size();
-        temp_present_info.pSwapchains = non_doob_swapchains.data();
-        temp_present_info.pImageIndices = non_doob_swapchain_img_indices.data();
-        if (pPresentInfo->pResults) {
-            results.resize(non_doob_swapchains.size());
-            temp_present_info.pResults = results.data();
-        }
-        VkResult ret;
-        DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, ret, QueuePresentKHR, (queue, &temp_present_info));
-        if (pPresentInfo->pResults) {
-            // remap results
-            for (uint32_t i = 0; i < temp_present_info.swapchainCount; ++i) {
-                pPresentInfo->pResults[non_doob_swapchain_reverse_indices[i]] = results[i];
-            }
-        }
-
-        return ret;
-    }
-
     return VK_SUCCESS;
 }
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
+VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
     VkDevice                                    device,
     const VkSwapchainCreateInfoKHR* pCreateInfo,
     const VkAllocationCallbacks* pAllocator,
@@ -655,7 +941,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
         return ret;
     }
 
-    VkAllocationCallbacks alloc = DOOB_GetFilledAllocationCallbacks(*pAllocator);
+    VkAllocationCallbacks alloc = DOOB_GetFilledAllocationCallbacks(pAllocator);
 
     uint32_t swapchain_handle;
     DOOB_DxgiSwapchain* swapchain_obj = DOOB_AllocCountedHandle(g_dxgi_swapchains, &swapchain_handle, &alloc);
@@ -669,7 +955,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
 
     return VK_SUCCESS;
 }
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateSharedSwapchainsKHR(
+VkResult VKAPI_CALL DOOB_CreateSharedSwapchainsKHR(
     VkDevice                                    device,
     uint32_t                                    swapchainCount,
     const VkSwapchainCreateInfoKHR* pCreateInfos,
@@ -681,12 +967,12 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateSharedSwapchainsKHR(
     return VK_INCOMPLETE;
 }
 
-VK_LAYER_EXPORT void VKAPI_CALL DOOB_DestroySwapchainKHR(
+void VKAPI_CALL DOOB_DestroySwapchainKHR(
     VkDevice                                    device,
     VkSwapchainKHR                              swapchain,
     const VkAllocationCallbacks* pAllocator) {
 
-    VkAllocationCallbacks alloc = DOOB_GetFilledAllocationCallbacks(*pAllocator);
+    VkAllocationCallbacks alloc = DOOB_GetFilledAllocationCallbacks(pAllocator);
 
     uint32_t swapchain_handle = DOOB_GetCounterAndVerify(DOOB_SWAPCHAIN_HANDLE_ID, swapchain);
     if (swapchain_handle == DOOB_INVALID_COUNTER_HANDLE) {
@@ -694,7 +980,7 @@ VK_LAYER_EXPORT void VKAPI_CALL DOOB_DestroySwapchainKHR(
     }
     DOOB_ReleaseCountedHandle(g_dxgi_swapchains, swapchain_handle, &alloc);
 }
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetSwapchainImagesKHR(
+VkResult VKAPI_CALL DOOB_GetSwapchainImagesKHR(
     VkDevice                                    device,
     VkSwapchainKHR                              swapchain,
     uint32_t* pSwapchainImageCount,
@@ -717,7 +1003,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetSwapchainImagesKHR(
     return VK_INCOMPLETE;
 }
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetSwapchainStatusKHR(
+VkResult VKAPI_CALL DOOB_GetSwapchainStatusKHR(
     VkDevice                                    device,
     VkSwapchainKHR                              swapchain) {
 
@@ -726,7 +1012,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetSwapchainStatusKHR(
     return VK_INCOMPLETE;
 }
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_AcquireFullScreenExclusiveModeEXT(
+VkResult VKAPI_CALL DOOB_AcquireFullScreenExclusiveModeEXT(
     VkDevice                                    device,
     VkSwapchainKHR                              swapchain) {
 
@@ -735,7 +1021,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_AcquireFullScreenExclusiveModeEXT(
     return VK_INCOMPLETE;
 }
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_AcquireNextImageKHR(
+VkResult VKAPI_CALL DOOB_AcquireNextImageKHR(
     VkDevice                                    device,
     VkSwapchainKHR                              swapchain,
     uint64_t                                    timeout,
@@ -747,7 +1033,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_AcquireNextImageKHR(
 
     return VK_INCOMPLETE;
 }
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_AcquireNextImage2KHR(
+VkResult VKAPI_CALL DOOB_AcquireNextImage2KHR(
     VkDevice                                    device,
     const VkAcquireNextImageInfoKHR* pAcquireInfo,
     uint32_t* pImageIndex) {
@@ -756,7 +1042,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_AcquireNextImage2KHR(
 
     return VK_INCOMPLETE;
 }
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetPastPresentationTimingGOOGLE(
+VkResult VKAPI_CALL DOOB_GetPastPresentationTimingGOOGLE(
     VkDevice                                    device,
     VkSwapchainKHR                              swapchain,
     uint32_t* pPresentationTimingCount,
@@ -766,7 +1052,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetPastPresentationTimingGOOGLE(
 
     return VK_INCOMPLETE;
 }
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetRefreshCycleDurationGOOGLE(
+VkResult VKAPI_CALL DOOB_GetRefreshCycleDurationGOOGLE(
     VkDevice                                    device,
     VkSwapchainKHR                              swapchain,
     VkRefreshCycleDurationGOOGLE* pDisplayTimingProperties) {
@@ -787,7 +1073,7 @@ VKAPI_ATTR VkResult VKAPI_CALL DOOB_GetSwapchainCounterEXT(
     return VK_INCOMPLETE;
 }
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetSwapchainTimeDomainPropertiesEXT(
+VkResult VKAPI_CALL DOOB_GetSwapchainTimeDomainPropertiesEXT(
     VkDevice                                    device,
     VkSwapchainKHR                              swapchain,
     VkSwapchainTimeDomainPropertiesEXT* pSwapchainTimeDomainProperties,
@@ -798,7 +1084,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetSwapchainTimeDomainPropertiesEXT(
     return VK_INCOMPLETE;
 }
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetSwapchainTimingPropertiesEXT(
+VkResult VKAPI_CALL DOOB_GetSwapchainTimingPropertiesEXT(
     VkDevice                                    device,
     VkSwapchainKHR                              swapchain,
     VkSwapchainTimingPropertiesEXT* pSwapchainTimingProperties,
@@ -809,7 +1095,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetSwapchainTimingPropertiesEXT(
     return VK_INCOMPLETE;
 }
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_LatencySleepNV(
+VkResult VKAPI_CALL DOOB_LatencySleepNV(
     VkDevice                                    device,
     VkSwapchainKHR                              swapchain,
     const VkLatencySleepInfoNV* pSleepInfo) {
@@ -818,7 +1104,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_LatencySleepNV(
 
     return VK_INCOMPLETE;
 }
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_ReleaseFullScreenExclusiveModeEXT(
+VkResult VKAPI_CALL DOOB_ReleaseFullScreenExclusiveModeEXT(
     VkDevice                                    device,
     VkSwapchainKHR                              swapchain) {
 
@@ -826,7 +1112,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_ReleaseFullScreenExclusiveModeEXT(
 
     return VK_INCOMPLETE;
 }
-VK_LAYER_EXPORT void VKAPI_CALL DOOB_SetHdrMetadataEXT(
+void VKAPI_CALL DOOB_SetHdrMetadataEXT(
     VkDevice                                    device,
     uint32_t                                    swapchainCount,
     const VkSwapchainKHR* pSwapchains,
@@ -835,7 +1121,7 @@ VK_LAYER_EXPORT void VKAPI_CALL DOOB_SetHdrMetadataEXT(
     // TODO
 
 }
-VK_LAYER_EXPORT void VKAPI_CALL DOOB_SetLatencyMarkerNV(
+void VKAPI_CALL DOOB_SetLatencyMarkerNV(
     VkDevice                                    device,
     VkSwapchainKHR                              swapchain,
     const VkSetLatencyMarkerInfoNV* pLatencyMarkerInfo) {
@@ -843,7 +1129,7 @@ VK_LAYER_EXPORT void VKAPI_CALL DOOB_SetLatencyMarkerNV(
     // TODO
 
 }
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_SetLatencySleepModeNV(
+VkResult VKAPI_CALL DOOB_SetLatencySleepModeNV(
     VkDevice                                    device,
     VkSwapchainKHR                              swapchain,
     const VkLatencySleepModeInfoNV* pSleepModeInfo) {
@@ -853,7 +1139,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_SetLatencySleepModeNV(
     return VK_INCOMPLETE;
 }
 
-VK_LAYER_EXPORT void VKAPI_CALL DOOB_SetLocalDimmingAMD(
+void VKAPI_CALL DOOB_SetLocalDimmingAMD(
     VkDevice                                    device,
     VkSwapchainKHR                              swapChain,
     VkBool32                                    localDimmingEnable) {
@@ -861,7 +1147,7 @@ VK_LAYER_EXPORT void VKAPI_CALL DOOB_SetLocalDimmingAMD(
     // TODO
 
 }
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_SetSwapchainPresentTimingQueueSizeEXT(
+VkResult VKAPI_CALL DOOB_SetSwapchainPresentTimingQueueSizeEXT(
     VkDevice                                    device,
     VkSwapchainKHR                              swapchain,
     uint32_t                                    size) {
@@ -871,7 +1157,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_SetSwapchainPresentTimingQueueSizeEXT(
     return VK_INCOMPLETE;
 }
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_WaitForPresentKHR(
+VkResult VKAPI_CALL DOOB_WaitForPresentKHR(
     VkDevice                                    device,
     VkSwapchainKHR                              swapchain,
     uint64_t                                    presentId,
@@ -882,7 +1168,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_WaitForPresentKHR(
     return VK_INCOMPLETE;
 }
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_WaitForPresent2KHR(
+VkResult VKAPI_CALL DOOB_WaitForPresent2KHR(
     VkDevice                                    device,
     VkSwapchainKHR                              swapchain,
     const VkPresentWait2InfoKHR* pPresentWait2Info) {
@@ -894,7 +1180,7 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_WaitForPresent2KHR(
 
 // ==== OUR CUSTOM FUNCTIONS ====
 
-VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_GetDxgiSwapchainHandleDOOB(
+VkResult VKAPI_CALL DOOB_GetDxgiSwapchainHandleDOOB(
     VkDevice                                    device,
     VkSwapchainKHR swapchain,
     IDXGISwapChain** pDxgiSwapchain
@@ -921,6 +1207,10 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL DOOB_GetInstanceProcAddr(VkInstanc
     DOOB_GETPROCADDR(EnumerateInstanceLayerProperties);
     DOOB_GETPROCADDR(EnumerateDeviceExtensionProperties);
     DOOB_GETPROCADDR(EnumeratePhysicalDevices);
+    DOOB_GETPROCADDR(EnumeratePhysicalDeviceGroups);
+    DOOB_GETPROCADDR(EnumeratePhysicalDeviceGroupsKHR);
+    DOOB_GETPROCADDR(GetPhysicalDeviceProperties2);
+    DOOB_GETPROCADDR(GetPhysicalDeviceProperties2KHR);
     DOOB_GETPROCADDR(CreateInstance);
     DOOB_GETPROCADDR(CreateDevice);
     DOOB_GETPROCADDR(DestroyInstance);
@@ -938,16 +1228,15 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL DOOB_GetDeviceProcAddr(VkDevice de
     DOOB_GETPROCADDR(DestroyDevice);
     DOOB_GETPROCADDR(GetDeviceQueue);
     DOOB_GETPROCADDR(GetDeviceQueue2);
-
+    if (strcmp(pName, "vkGetDxgiSwapchainHandleDOOB") == 0) {
+        return (PFN_vkVoidFunction)DOOB_GetDxgiSwapchainHandleDOOB;
+    }
     bool enabled_extension = false;
     {
         scoped_lock l(global_lock);
-        enabled_extension = g_device_config[device].enabled_dxgi_swapchain;
+        enabled_extension = g_device_config[device].dxgi_swapchain_extension_enabled;
     }
     if (enabled_extension) {
-        if (strcmp(pName, "vkGetDxgiSwapchainHandleDOOB") == 0) {
-            return (PFN_vkVoidFunction)DOOB_GetDxgiSwapchainHandleDOOB;
-        }
         DOOB_GETPROCADDR(GetDeviceGroupPresentCapabilitiesKHR);
         DOOB_GETPROCADDR(GetPhysicalDevicePresentRectanglesKHR);
         DOOB_GETPROCADDR(QueuePresentKHR);

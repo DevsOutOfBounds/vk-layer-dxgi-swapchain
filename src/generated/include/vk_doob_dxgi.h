@@ -15,8 +15,9 @@
 #define VK_LAYER_DOOB_API_VERSION_MAJOR                    1
 #define VK_LAYER_DOOB_API_VERSION_MINOR                    4
 #define VK_LAYER_DOOB_API_VERSION_PATCH                    340
-#define VK_STRUCTURE_TYPE_DXGI_DEVICE_FEATURES_DOOB        ((VkStructureType)(2123157880))
-#define VK_STRUCTURE_TYPE_DXGI_SWAPCHAIN_CREATE_INFO_DOOB  ((VkStructureType)(2123157881))
+#define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DXGI_PROPERTIES_DOOB ((VkStructureType)(2123157880))
+#define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DXGI_FEATURES_DOOB ((VkStructureType)(2123157881))
+#define VK_STRUCTURE_TYPE_DXGI_SWAPCHAIN_CREATE_INFO_DOOB  ((VkStructureType)(2123157882))
 
 enum VkDxgiDeviceVersionDOOB {
     VK_DXGI_DEVICE_VERSION_AUTO_DOOB = 0,
@@ -26,11 +27,18 @@ enum VkDxgiDeviceVersionDOOB {
     VK_DXGI_DEVICE_VERSION_MAX_ENUM_DOOB = 0x7FFFFFFF
 };
 
-typedef struct VkDxgiDeviceFeaturesDOOB {
+typedef struct VkPhysicalDeviceDxgiPropertiesDOOB {
     VkStructureType                     sType;
     const void*                         pNext;
+    VkBool32                            dxgiSwapchain;
+} VkPhysicalDeviceDxgiPropertiesDOOB;
+
+typedef struct VkPhysicalDeviceDxgiFeaturesDOOB {
+    VkStructureType                     sType;
+    const void*                         pNext;
+    VkBool32                            enableDxgiSwapchain;
     VkDxgiDeviceVersionDOOB             dxgiVersion;
-} VkDxgiDeviceFeaturesDOOB;
+} VkPhysicalDeviceDxgiFeaturesDOOB;
 
 typedef struct VkDxgiSwapchainCreateInfoDOOB {
     VkStructureType                     sType;
