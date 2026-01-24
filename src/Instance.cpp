@@ -390,6 +390,18 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateDevice(
         return VK_ERROR_INITIALIZATION_FAILED;
     }
 
+    PFN_vkGetInstanceProcAddr gipa = layerCreateInfo->u.pLayerInfo->pfnNextGetInstanceProcAddr;
+    PFN_vkGetDeviceProcAddr gdpa = layerCreateInfo->u.pLayerInfo->pfnNextGetDeviceProcAddr;
+    // move chain on for next layer
+    layerCreateInfo->u.pLayerInfo = layerCreateInfo->u.pLayerInfo->pNext;
+
+    PFN_vkCreateDevice createFunc = (PFN_vkCreateDevice)gipa(VK_NULL_HANDLE, "vkCreateDevice");
+
+    VkResult ret = createFunc(physicalDevice, pCreateInfo, pAllocator, pDevice);
+    if (ret != VK_SUCCESS) {
+        return ret;
+    }
+
     bool is_doob_enabled = false;
     if (pCreateInfo->ppEnabledExtensionNames) {
         for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; i++) {
@@ -404,18 +416,6 @@ VK_LAYER_EXPORT VkResult VKAPI_CALL DOOB_CreateDevice(
         g_device_config[*pDevice].enabled_dxgi_swapchain = is_doob_enabled;
     }
 
-
-    PFN_vkGetInstanceProcAddr gipa = layerCreateInfo->u.pLayerInfo->pfnNextGetInstanceProcAddr;
-    PFN_vkGetDeviceProcAddr gdpa = layerCreateInfo->u.pLayerInfo->pfnNextGetDeviceProcAddr;
-    // move chain on for next layer
-    layerCreateInfo->u.pLayerInfo = layerCreateInfo->u.pLayerInfo->pNext;
-
-    PFN_vkCreateDevice createFunc = (PFN_vkCreateDevice)gipa(VK_NULL_HANDLE, "vkCreateDevice");
-
-    VkResult ret = createFunc(physicalDevice, pCreateInfo, pAllocator, pDevice);
-    if (ret != VK_SUCCESS) {
-        return ret;
-    }
 #define ASSIGN_DISPATCH(fn) dispatchTable.fn = (PFN_vk##fn)gdpa(*pDevice, "vk"#fn) 
 
     // fetch our own dispatch table for the functions we need, into the next layer
