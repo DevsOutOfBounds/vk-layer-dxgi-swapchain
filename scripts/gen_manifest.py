@@ -9,16 +9,14 @@ from common import SPEC_VERSION_INT
 LAYER_SETTINGS = [
     {
         "key": "enable_dxgi_interop",
-        "env": "VK_DOOB_FORCE_ENABLE_DXGI_INTEROP",
         "label": "Force Enable DXGI Interop",
         "description": "If enabled, ALL swapchains will be backed by DXGI surfaces.",
         "type": "BOOL",
-        "default": "true",
+        "default": False,
         "view": "STANDARD" # Options: STANDARD, ADVANCED, HIDDEN
     },
     {
         "key": "force_dxgi_version",
-        "env": "VK_DOOB_FORCE_DXGI_VERSION",
         "label": "Force DXGI Version",
         "description": "Force a specific DXGI factory version.",
         "type": "ENUM",
@@ -44,7 +42,6 @@ LAYER_SETTINGS = [
     },
     {
         "key": "log_file_path",
-        "env": "VK_DOOB_LOG_FILE",
         "label": "Log File Path",
         "description": "Where to save the internal layer logs.",
         "type": "SAVE_FILE", # Creates a file picker in vkconfig

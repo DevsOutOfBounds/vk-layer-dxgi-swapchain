@@ -166,21 +166,30 @@ static VkAllocationCallbacks DOOB_GetFilledAllocationCallbacks(const VkAllocatio
 
 static DoobSettings DOOB_LoadSettings() {
     DoobSettings s;
+    DOOB_print("[DOOB INFO]: loading settings\n");
 
-    const char* env_enable = std::getenv("VK_DOOB_FORCE_ENABLE_DXGI_INTEROP");
-    if (env_enable && strcmp(env_enable, "true") == 0) {
-        s.force_enable_dxgi = true;
-    }
-    else {
-        s.force_enable_dxgi = false; // Default
-    }
+    VkLayerSettingsCreateInfoEXT create_info{
+        .sType = VK_STRUCTURE_TYPE_LAYER_SETTINGS_CREATE_INFO_EXT,
+    };
+    VkuLayerSettingSet setting_set;
 
-    const char* env_ver = std::getenv("VK_DOOB_FORCE_DXGI_VERSION");
-    if (env_ver && strcmp(env_ver, "d3d11") == 0) {
+    VkResult res;
+
+    res = vkuCreateLayerSettingSet(VK_LAYER_DOOB_DXGI_SWAPCHAIN_NAME, &create_info, nullptr, NULL, &setting_set);
+    if (res != VK_SUCCESS) {
+        return {};
+    }
+    res = vkuGetLayerSettingValue(setting_set, "enable_dxgi_interop", s.force_enable_dxgi);
+    DOOB_print("[DOOB INFO]: enable_dxgi_interop = %s\n", s.force_enable_dxgi ? "true" : "false");
+
+    std::string dxgi_ver = {};
+    vkuGetLayerSettingValue(setting_set, "force_dxgi_version", dxgi_ver);
+    DOOB_print("[DOOB INFO]: force_dxgi_version = %s\n", dxgi_ver.c_str());
+    if (dxgi_ver == "d3d11") {
         s.force_dxgi_version = true;
         s.force_dxgi_version_value = VK_DXGI_DEVICE_VERSION_D3D11_DOOB;
     }
-    else if (env_ver && strcmp(env_ver, "d3d12") == 0) {
+    else if (dxgi_ver == "d3d12") {
         s.force_dxgi_version = true;
         s.force_dxgi_version_value = VK_DXGI_DEVICE_VERSION_D3D12_DOOB;
     }
@@ -188,8 +197,9 @@ static DoobSettings DOOB_LoadSettings() {
         s.force_dxgi_version = false;
     }
 
-    const char* env_log = std::getenv("VK_DOOB_LOG_FILE");
-    s.log_file = env_log ? env_log : "";
+    vkuGetLayerSettingValue(setting_set, "log_file_path", s.log_file);
+
+    vkuDestroyLayerSettingSet(setting_set, nullptr);
 
     return s;
 }
@@ -270,6 +280,7 @@ VkResult VKAPI_CALL DOOB_CreateInstance(
     }
     // Is the layer enabling it and the application didnt? Enable all required extensions!
     if (global_dxgi_layer_settings.force_enable_dxgi) {
+        DOOB_print("[DOOB INFO]: VK_DOOB_dxgi_swapchain has been enabled by configurator\n");
         for (const auto& ext : REQUIRED_INSTANCE_EXTS) {
             if (enabled_api_version >= ext.promoted_to_vk) continue; // No enabling needed
             bool already_enabled = false;
@@ -280,7 +291,7 @@ VkResult VKAPI_CALL DOOB_CreateInstance(
                 }
             }
             if (!already_enabled) {
-                DOOB_print("[DOOB] WARNING: Implicitly enabling extension %s\n", ext.name);
+                DOOB_print("[DOOB WARNING]: Implicitly enabling extension %s\n", ext.name);
                 enabled_extensions.push_back(ext.name);
             }
         }
@@ -430,7 +441,7 @@ void VKAPI_CALL DOOB_GetPhysicalDeviceProperties2KHR(
         }
         if (dxgi_device_properties) {
             // TODO: do we need this?
-            
+
             //VkPhysicalDeviceIDProperties id_properties{
             //    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
             //};
@@ -701,7 +712,8 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
         enabled_extensions[i] = pCreateInfo->ppEnabledExtensionNames[i];
     }
     // Is the layer enabling it and the application didnt? Enable all required extensions!
-    if (global_dxgi_layer_settings.force_enable_dxgi && !dxgi_device_features) {
+    if (global_dxgi_layer_settings.force_enable_dxgi) {
+        is_dxgi_enabled = true;
         for (const auto& ext : REQUIRED_DEVICE_EXTS) {
             if (enabled_api_version >= ext.promoted_to_vk) continue; // No enabling needed
             bool already_enabled = false;
@@ -712,7 +724,7 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
                 }
             }
             if (!already_enabled) {
-                DOOB_print("[DOOB] WARNING: Implicitly enabling extension %s\n", ext.name);
+                DOOB_print("[DOOB WARNING]: Implicitly enabling extension %s\n", ext.name);
                 enabled_extensions.push_back(ext.name);
             }
         }
