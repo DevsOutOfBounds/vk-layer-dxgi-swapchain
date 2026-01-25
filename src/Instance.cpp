@@ -27,6 +27,7 @@ static DoobRequiredExt REQUIRED_INSTANCE_EXTS[] = {
 
 static DoobRequiredExt REQUIRED_DEVICE_EXTS[] = {
     { VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME, ~0U },
+    { VK_KHR_WIN32_KEYED_MUTEX_EXTENSION_NAME, ~0U },
 };
 
 
@@ -336,6 +337,9 @@ VkResult VKAPI_CALL DOOB_CreateInstance(
     ASSIGN_DISPATCH(GetPhysicalDeviceProperties2);
     ASSIGN_DISPATCH(GetPhysicalDeviceFeatures2KHR);
     ASSIGN_DISPATCH(GetPhysicalDeviceFeatures2);
+    ASSIGN_DISPATCH(GetPhysicalDeviceSurfaceCapabilitiesKHR);
+    ASSIGN_DISPATCH(GetPhysicalDeviceSurfaceCapabilities2KHR);
+    ASSIGN_DISPATCH(GetPhysicalDeviceSurfaceCapabilities2EXT);
     ASSIGN_DISPATCH(CreateInstance);
     ASSIGN_DISPATCH(CreateDevice);
     ASSIGN_DISPATCH(DestroyInstance);
@@ -640,6 +644,149 @@ VkResult VKAPI_CALL DOOB_EnumerateDeviceExtensionProperties(
     }
 }
 
+VkResult VKAPI_CALL DOOB_GetPhysicalDevicePresentRectanglesKHR(
+    VkPhysicalDevice                            physicalDevice,
+    VkSurfaceKHR                                surface,
+    uint32_t* pRectCount,
+    VkRect2D* pRects) {
+
+    VkInstance instance = DOOB_GetInstanceFromPhysicalDevice(physicalDevice);
+    bool extension_supported_on_inst_level = false;
+    uint32_t using_api_version = 0;
+    if (instance == VK_NULL_HANDLE) {
+        return VK_ERROR_UNKNOWN;
+    }
+    {
+        scoped_lock l(global_lock);
+        extension_supported_on_inst_level = g_instance_config[instance].supports_dxgi_ext;
+        using_api_version = g_instance_config[instance].vk_api_version;
+    }
+    if (!extension_supported_on_inst_level) {
+        VkResult res;
+        DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, res, GetPhysicalDevicePresentRectanglesKHR, (physicalDevice, surface, pRectCount, pRects));
+        return res;
+    }
+    if (!pRectCount) {
+        return VK_INCOMPLETE;
+    }
+
+    VkIcdSurfaceWin32* win32_surface = (VkIcdSurfaceWin32*)surface;
+    if (win32_surface->base.platform != VK_ICD_WSI_PLATFORM_WIN32) {
+        return VK_ERROR_UNKNOWN;
+    }
+    // TODO
+
+    return VK_ERROR_UNKNOWN;
+}
+VkResult VKAPI_CALL DOOB_GetPhysicalDeviceSurfaceCapabilitiesKHR(
+    VkPhysicalDevice                            physicalDevice,
+    VkSurfaceKHR                                surface,
+    VkSurfaceCapabilitiesKHR* pSurfaceCapabilities) {
+    
+    VkInstance instance = DOOB_GetInstanceFromPhysicalDevice(physicalDevice);
+    bool extension_supported_on_inst_level = false;
+    uint32_t using_api_version = 0;
+    if (instance == VK_NULL_HANDLE) {
+        return VK_ERROR_UNKNOWN;
+    }
+    {
+        scoped_lock l(global_lock);
+        extension_supported_on_inst_level = g_instance_config[instance].supports_dxgi_ext;
+        using_api_version = g_instance_config[instance].vk_api_version;
+    }
+    if (!extension_supported_on_inst_level) {
+        VkResult res;
+        DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, res, GetPhysicalDeviceSurfaceCapabilitiesKHR, (physicalDevice, surface, pSurfaceCapabilities));
+        return res;
+    }
+    if (!pSurfaceCapabilities) {
+        return VK_INCOMPLETE;
+    }
+    VkIcdSurfaceWin32* win32_surface = (VkIcdSurfaceWin32*)surface;
+    if (win32_surface->base.platform != VK_ICD_WSI_PLATFORM_WIN32) {
+        return VK_ERROR_UNKNOWN;
+    }
+    RECT rect;
+    if (GetClientRect(win32_surface->hwnd, &rect) == FALSE) {
+        return VK_ERROR_SURFACE_LOST_KHR;
+    }
+    pSurfaceCapabilities->minImageCount = 2;
+    pSurfaceCapabilities->maxImageCount = DXGI_MAX_SWAP_CHAIN_BUFFERS;
+    pSurfaceCapabilities->currentExtent = { (uint32_t)(rect.right - rect.left), (uint32_t)(rect.bottom - rect.top) };
+    pSurfaceCapabilities->minImageExtent = pSurfaceCapabilities->maxImageExtent = pSurfaceCapabilities->currentExtent;
+    pSurfaceCapabilities->maxImageArrayLayers = 1;
+    pSurfaceCapabilities->supportedTransforms = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    pSurfaceCapabilities->currentTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    pSurfaceCapabilities->supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR |
+        VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR /*DXGI_ALPHA_MODE_PREMULTIPLIED*/;
+
+    // FIXME: query for the supported formats, and their respective supported usage flags, but these should be safe 99.9% of the time
+    pSurfaceCapabilities->supportedUsageFlags = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT | 
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    return VK_SUCCESS;
+}
+VkResult VKAPI_CALL DOOB_GetPhysicalDeviceSurfaceCapabilities2KHR(
+    VkPhysicalDevice                            physicalDevice,
+    const VkPhysicalDeviceSurfaceInfo2KHR* pSurfaceInfo,
+    VkSurfaceCapabilities2KHR* pSurfaceCapabilities) {
+    
+    VkInstance instance = DOOB_GetInstanceFromPhysicalDevice(physicalDevice);
+    bool extension_supported_on_inst_level = false;
+    uint32_t using_api_version = 0;
+    if (instance == VK_NULL_HANDLE) {
+        return VK_ERROR_UNKNOWN;
+    }
+    {
+        scoped_lock l(global_lock);
+        extension_supported_on_inst_level = g_instance_config[instance].supports_dxgi_ext;
+        using_api_version = g_instance_config[instance].vk_api_version;
+    }
+    VkResult res;
+    DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, res, GetPhysicalDeviceSurfaceCapabilities2KHR, (physicalDevice, pSurfaceInfo, pSurfaceCapabilities));
+    if (!extension_supported_on_inst_level || res != VK_SUCCESS) {
+        return res;
+    }
+    if (!pSurfaceInfo || !pSurfaceCapabilities) {
+        return VK_INCOMPLETE;
+    }
+    VkIcdSurfaceWin32* win32_surface = (VkIcdSurfaceWin32*)pSurfaceInfo->surface;
+    if (win32_surface->base.platform != VK_ICD_WSI_PLATFORM_WIN32) {
+        return VK_ERROR_UNKNOWN;
+    }
+    return DOOB_GetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, pSurfaceInfo->surface, &pSurfaceCapabilities->surfaceCapabilities);
+}
+VkResult VKAPI_CALL DOOB_GetPhysicalDeviceSurfaceCapabilities2EXT(
+    VkPhysicalDevice                            physicalDevice,
+    VkSurfaceKHR surface,
+    VkSurfaceCapabilities2EXT* pSurfaceCapabilities) {
+
+    VkInstance instance = DOOB_GetInstanceFromPhysicalDevice(physicalDevice);
+    bool extension_supported_on_inst_level = false;
+    uint32_t using_api_version = 0;
+    if (instance == VK_NULL_HANDLE) {
+        return VK_ERROR_UNKNOWN;
+    }
+    {
+        scoped_lock l(global_lock);
+        extension_supported_on_inst_level = g_instance_config[instance].supports_dxgi_ext;
+        using_api_version = g_instance_config[instance].vk_api_version;
+    }
+    VkResult res;
+    DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, res, GetPhysicalDeviceSurfaceCapabilities2EXT, (physicalDevice, surface, pSurfaceCapabilities));
+    if (!extension_supported_on_inst_level || res != VK_SUCCESS) {
+        return res;
+    }
+    if (!pSurfaceCapabilities) {
+        return VK_INCOMPLETE;
+    }
+    VkIcdSurfaceWin32* win32_surface = (VkIcdSurfaceWin32*)surface;
+    if (win32_surface->base.platform != VK_ICD_WSI_PLATFORM_WIN32) {
+        return VK_ERROR_UNKNOWN;
+    }
+    pSurfaceCapabilities->supportedSurfaceCounters = VK_SURFACE_COUNTER_VBLANK_BIT_EXT;
+    return DOOB_GetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, (VkSurfaceCapabilitiesKHR*)&pSurfaceCapabilities);
+}
+
 VkResult VKAPI_CALL DOOB_CreateDevice(
     VkPhysicalDevice                            physicalDevice,
     const VkDeviceCreateInfo* pCreateInfo,
@@ -941,17 +1088,6 @@ VkResult VKAPI_CALL DOOB_GetDeviceGroupPresentCapabilitiesKHR(
 
     return VK_INCOMPLETE;
 }
-
-VkResult VKAPI_CALL DOOB_GetPhysicalDevicePresentRectanglesKHR(
-    VkPhysicalDevice                            physicalDevice,
-    VkSurfaceKHR                                surface,
-    uint32_t* pRectCount,
-    VkRect2D* pRects) {
-
-    // TODO
-
-    return VK_INCOMPLETE;
-}
 void VKAPI_CALL DOOB_GetDeviceQueue2(
     VkDevice                                    device,
     const VkDeviceQueueInfo2* pQueueInfo,
@@ -994,7 +1130,7 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
     const VkAllocationCallbacks* pAllocator,
     VkSwapchainKHR* pSwapchain) {
 
-    printf("[DOOB] Your swapchain is out of bounds\n");
+    DOOB_print("[DOOB] Your swapchain is out of bounds\n");
 
     VkIcdSurfaceWin32* win32_surface = (VkIcdSurfaceWin32*)pCreateInfo->surface;
     if (win32_surface->base.platform != VK_ICD_WSI_PLATFORM_WIN32) {
@@ -1134,9 +1270,37 @@ VkResult VKAPI_CALL DOOB_GetRefreshCycleDurationGOOGLE(
     VkSwapchainKHR                              swapchain,
     VkRefreshCycleDurationGOOGLE* pDisplayTimingProperties) {
 
-    // TODO
+    DOOB_DxgiSwapchain* swapchain_obj = DOOB_GetObjectIfExists(g_dxgi_swapchains, DOOB_SWAPCHAIN_HANDLE_ID, swapchain);
+    if (!swapchain_obj) {
+        return VK_ERROR_UNKNOWN;
+    }
+    DXGI_FRAME_STATISTICS statistics;
+    HRESULT hres = swapchain_obj->swapchain->GetFrameStatistics(&statistics);
+    if (hres != S_OK) {
+        return VK_ERROR_SURFACE_LOST_KHR;
+    }
+    if (!pDisplayTimingProperties) {
+        return VK_SUCCESS; // according to spec, there is no VK_INCOMPLETE?
+    }
 
-    return VK_ERROR_UNKNOWN;
+    LARGE_INTEGER ElapsedMicroseconds;
+    LARGE_INTEGER Frequency;
+
+    QueryPerformanceFrequency(&Frequency);
+    ElapsedMicroseconds.QuadPart = statistics.SyncQPCTime.QuadPart;
+
+    //
+    // We now have the elapsed number of ticks, along with the
+    // number of ticks-per-second. We use these values
+    // to convert to the number of elapsed microseconds.
+    // To guard against loss-of-precision, we convert
+    // to microseconds *before* dividing by ticks-per-second.
+    //
+
+    ElapsedMicroseconds.QuadPart *= 1000000;
+    ElapsedMicroseconds.QuadPart /= Frequency.QuadPart;
+    pDisplayTimingProperties->refreshDuration = ((uint64_t)ElapsedMicroseconds.QuadPart) * 1000 /*to nanoseconds*/;
+    return VK_SUCCESS;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL DOOB_GetSwapchainCounterEXT(
@@ -1145,9 +1309,25 @@ VKAPI_ATTR VkResult VKAPI_CALL DOOB_GetSwapchainCounterEXT(
     VkSurfaceCounterFlagBitsEXT                 counter,
     uint64_t* pCounterValue) {
 
-    // TODO
-
-    return VK_ERROR_UNKNOWN;
+    DOOB_DxgiSwapchain* swapchain_obj = DOOB_GetObjectIfExists(g_dxgi_swapchains, DOOB_SWAPCHAIN_HANDLE_ID, swapchain);
+    if (!swapchain_obj) {
+        return VK_ERROR_UNKNOWN;
+    }
+    DXGI_FRAME_STATISTICS statistics;
+    HRESULT hres = swapchain_obj->swapchain->GetFrameStatistics(&statistics);
+    if (hres != S_OK) {
+        return VK_ERROR_SURFACE_LOST_KHR;
+    }
+    if (!pCounterValue) {
+        return VK_SUCCESS; // according to spec, there is no VK_INCOMPLETE?
+    }
+    if (counter & VK_SURFACE_COUNTER_VBLANK_BIT_EXT) {
+        *pCounterValue = (uint64_t)statistics.PresentRefreshCount;
+    }
+    else {
+        return VK_ERROR_UNKNOWN;
+    }
+    return VK_SUCCESS;
 }
 
 VkResult VKAPI_CALL DOOB_GetSwapchainTimeDomainPropertiesEXT(
@@ -1290,6 +1470,9 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL DOOB_GetInstanceProcAddr(VkInstanc
     DOOB_GETPROCADDR(GetPhysicalDeviceProperties2KHR);
     DOOB_GETPROCADDR(GetPhysicalDeviceFeatures2KHR);
     DOOB_GETPROCADDR(GetPhysicalDeviceFeatures2);
+    DOOB_GETPROCADDR(GetPhysicalDeviceSurfaceCapabilitiesKHR);
+    DOOB_GETPROCADDR(GetPhysicalDeviceSurfaceCapabilities2KHR);
+    DOOB_GETPROCADDR(GetPhysicalDeviceSurfaceCapabilities2EXT);
     DOOB_GETPROCADDR(CreateInstance);
     DOOB_GETPROCADDR(CreateDevice);
     DOOB_GETPROCADDR(DestroyInstance);
