@@ -340,6 +340,9 @@ VkResult VKAPI_CALL DOOB_CreateInstance(
     ASSIGN_DISPATCH(GetPhysicalDeviceSurfaceCapabilitiesKHR);
     ASSIGN_DISPATCH(GetPhysicalDeviceSurfaceCapabilities2KHR);
     ASSIGN_DISPATCH(GetPhysicalDeviceSurfaceCapabilities2EXT);
+    ASSIGN_DISPATCH(GetPhysicalDeviceSurfacePresentModesKHR);
+    ASSIGN_DISPATCH(GetPhysicalDeviceSurfaceFormatsKHR);
+    ASSIGN_DISPATCH(GetPhysicalDeviceSurfaceSupportKHR);
     ASSIGN_DISPATCH(CreateInstance);
     ASSIGN_DISPATCH(CreateDevice);
     ASSIGN_DISPATCH(DestroyInstance);
@@ -682,7 +685,7 @@ VkResult VKAPI_CALL DOOB_GetPhysicalDeviceSurfaceCapabilitiesKHR(
     VkPhysicalDevice                            physicalDevice,
     VkSurfaceKHR                                surface,
     VkSurfaceCapabilitiesKHR* pSurfaceCapabilities) {
-    
+
     VkInstance instance = DOOB_GetInstanceFromPhysicalDevice(physicalDevice);
     bool extension_supported_on_inst_level = false;
     uint32_t using_api_version = 0;
@@ -721,7 +724,7 @@ VkResult VKAPI_CALL DOOB_GetPhysicalDeviceSurfaceCapabilitiesKHR(
         VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR /*DXGI_ALPHA_MODE_PREMULTIPLIED*/;
 
     // FIXME: query for the supported formats, and their respective supported usage flags, but these should be safe 99.9% of the time
-    pSurfaceCapabilities->supportedUsageFlags = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT | 
+    pSurfaceCapabilities->supportedUsageFlags = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     return VK_SUCCESS;
 }
@@ -729,7 +732,7 @@ VkResult VKAPI_CALL DOOB_GetPhysicalDeviceSurfaceCapabilities2KHR(
     VkPhysicalDevice                            physicalDevice,
     const VkPhysicalDeviceSurfaceInfo2KHR* pSurfaceInfo,
     VkSurfaceCapabilities2KHR* pSurfaceCapabilities) {
-    
+
     VkInstance instance = DOOB_GetInstanceFromPhysicalDevice(physicalDevice);
     bool extension_supported_on_inst_level = false;
     uint32_t using_api_version = 0;
@@ -785,6 +788,105 @@ VkResult VKAPI_CALL DOOB_GetPhysicalDeviceSurfaceCapabilities2EXT(
     }
     pSurfaceCapabilities->supportedSurfaceCounters = VK_SURFACE_COUNTER_VBLANK_BIT_EXT;
     return DOOB_GetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, (VkSurfaceCapabilitiesKHR*)&pSurfaceCapabilities);
+}
+
+static const VkPresentModeKHR SUPPORTED_PRESENT_MODES[] = {
+    VK_PRESENT_MODE_IMMEDIATE_KHR,
+    VK_PRESENT_MODE_MAILBOX_KHR,
+    VK_PRESENT_MODE_FIFO_KHR,
+};
+VkResult VKAPI_CALL DOOB_GetPhysicalDeviceSurfacePresentModesKHR(
+    VkPhysicalDevice                            physicalDevice,
+    VkSurfaceKHR                                surface,
+    uint32_t* pPresentModeCount,
+    VkPresentModeKHR* pPresentModes) {
+    VkInstance instance = DOOB_GetInstanceFromPhysicalDevice(physicalDevice);
+    bool extension_supported_on_inst_level = false;
+    uint32_t using_api_version = 0;
+    if (instance == VK_NULL_HANDLE) {
+        return VK_ERROR_UNKNOWN;
+    }
+    {
+        scoped_lock l(global_lock);
+        extension_supported_on_inst_level = g_instance_config[instance].supports_dxgi_ext;
+        using_api_version = g_instance_config[instance].vk_api_version;
+    }
+    if (!extension_supported_on_inst_level) {
+        VkResult res;
+        DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, res, GetPhysicalDeviceSurfacePresentModesKHR, (physicalDevice, surface, pPresentModeCount, pPresentModes));
+        return res;
+    }
+
+    if (!pPresentModeCount) {
+        return VK_INCOMPLETE;
+    }
+    if (pPresentModes) {
+        for (uint32_t i = 0; i < *pPresentModeCount && i < (uint32_t)(sizeof(SUPPORTED_PRESENT_MODES) / sizeof(*SUPPORTED_PRESENT_MODES)); ++i) {
+            pPresentModes[i] = SUPPORTED_PRESENT_MODES[i];
+        }
+        if (*pPresentModeCount != (uint32_t)(sizeof(SUPPORTED_PRESENT_MODES) / sizeof(*SUPPORTED_PRESENT_MODES))) {
+            return VK_INCOMPLETE;
+        }
+        else {
+            return VK_SUCCESS;
+        }
+    }
+    else {
+        *pPresentModeCount = sizeof(SUPPORTED_PRESENT_MODES) / sizeof(*SUPPORTED_PRESENT_MODES);
+        return VK_SUCCESS;
+    }
+}
+VkResult VKAPI_CALL DOOB_GetPhysicalDeviceSurfaceFormatsKHR(
+    VkPhysicalDevice                            physicalDevice,
+    VkSurfaceKHR                                surface,
+    uint32_t* pSurfaceFormatCount,
+    VkSurfaceFormatKHR* pSurfaceFormats) {
+    VkInstance instance = DOOB_GetInstanceFromPhysicalDevice(physicalDevice);
+    bool extension_supported_on_inst_level = false;
+    uint32_t using_api_version = 0;
+    if (instance == VK_NULL_HANDLE) {
+        return VK_ERROR_UNKNOWN;
+    }
+    {
+        scoped_lock l(global_lock);
+        extension_supported_on_inst_level = g_instance_config[instance].supports_dxgi_ext;
+        using_api_version = g_instance_config[instance].vk_api_version;
+    }
+    if (!extension_supported_on_inst_level) {
+        VkResult res;
+        DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, res, GetPhysicalDeviceSurfaceFormatsKHR, (physicalDevice, surface, pSurfaceFormatCount, pSurfaceFormats));
+        return res;
+    }
+
+    // TODO: somehow query the DXGI supported formats
+
+    return VK_ERROR_UNKNOWN;
+}
+
+VkResult VKAPI_CALL DOOB_GetPhysicalDeviceSurfaceSupportKHR(
+    VkPhysicalDevice                            physicalDevice,
+    uint32_t                                    queueFamilyIndex,
+    VkSurfaceKHR                                surface,
+    VkBool32* pSupported) {
+    VkInstance instance = DOOB_GetInstanceFromPhysicalDevice(physicalDevice);
+    bool extension_supported_on_inst_level = false;
+    uint32_t using_api_version = 0;
+    if (instance == VK_NULL_HANDLE) {
+        return VK_ERROR_UNKNOWN;
+    }
+    {
+        scoped_lock l(global_lock);
+        extension_supported_on_inst_level = g_instance_config[instance].supports_dxgi_ext;
+        using_api_version = g_instance_config[instance].vk_api_version;
+    }
+    if (!extension_supported_on_inst_level) {
+        VkResult res;
+        DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, res, GetPhysicalDeviceSurfaceSupportKHR, (physicalDevice, queueFamilyIndex, surface, pSupported));
+        return res;
+    }
+    // Any queue is supported, as long as we can release and acquire the queued mutex
+    *pSupported = VK_TRUE;
+    return VK_SUCCESS;
 }
 
 VkResult VKAPI_CALL DOOB_CreateDevice(
@@ -1473,6 +1575,8 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL DOOB_GetInstanceProcAddr(VkInstanc
     DOOB_GETPROCADDR(GetPhysicalDeviceSurfaceCapabilitiesKHR);
     DOOB_GETPROCADDR(GetPhysicalDeviceSurfaceCapabilities2KHR);
     DOOB_GETPROCADDR(GetPhysicalDeviceSurfaceCapabilities2EXT);
+    DOOB_GETPROCADDR(GetPhysicalDeviceSurfacePresentModesKHR);
+    DOOB_GETPROCADDR(GetPhysicalDeviceSurfaceFormatsKHR);
     DOOB_GETPROCADDR(CreateInstance);
     DOOB_GETPROCADDR(CreateDevice);
     DOOB_GETPROCADDR(DestroyInstance);

@@ -5,6 +5,7 @@ from common import CONFIG
 from common import FULL_VERSION_STR
 from common import IMPL_VERSION_INT
 from common import SPEC_VERSION_INT
+# https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderLayerInterface.md#layer-manifest-file-format
 
 LAYER_SETTINGS = [
     {
@@ -56,7 +57,6 @@ def get_args():
     parser.add_argument('--library_name', type=str)
     args = parser.parse_args()
     return args
-
 def generate_json(output_json, library_name):
     manifest = {
         "file_format_version": "1.1.2",
