@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "Core.h"
 #include "DxgiSwapchain.h"
@@ -49,17 +49,11 @@ struct DoobInstanceConfig {
     uint32_t vk_api_version;
     bool supports_dxgi_ext;
 };
-struct DoobWin32Surface {
-	HINSTANCE hinstance;
-    HWND hwnd;
-};
-
 std::unordered_map<VkInstance, VkLayerInstanceDispatchTable> g_instance_dispatch;
 std::unordered_map<VkInstance, DoobInstanceConfig> g_instance_config;
 std::unordered_map<VkDevice, VkLayerDispatchTable> g_device_dispatch;
 std::unordered_map<VkDevice, DoobDeviceConfig> g_device_config;
 std::unordered_map<VkQueue, VkDevice> g_queue_ownership;
-std::unordered_map<VkSurfaceKHR, DoobWin32Surface> g_win32_surfaces;
 
 #define DOOB_CALL_DISPATCH_TABLE(table, object, retval, fn, params) do { PFN_vk##fn icd_function_call = NULL; \
 { scoped_lock l(global_lock); icd_function_call = table[object].fn; } retval = icd_function_call params; } while (false) 
@@ -353,7 +347,6 @@ VkResult VKAPI_CALL DOOB_CreateInstance(
     ASSIGN_DISPATCH(CreateDevice);
     ASSIGN_DISPATCH(DestroyInstance);
     ASSIGN_DISPATCH(GetPhysicalDevicePresentRectanglesKHR);
-    ASSIGN_DISPATCH(CreateWin32SurfaceKHR);
 
 #undef ASSIGN_DISPATCH
 
@@ -1239,19 +1232,11 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
     const VkAllocationCallbacks* pAllocator,
     VkSwapchainKHR* pSwapchain) {
 
-<<<<<<< HEAD
     DOOB_print("[DOOB] Your swapchain is out of bounds\n");
 
     VkIcdSurfaceWin32* win32_surface = (VkIcdSurfaceWin32*)pCreateInfo->surface;
     if (win32_surface->base.platform != VK_ICD_WSI_PLATFORM_WIN32) {
         return VK_ERROR_INITIALIZATION_FAILED;
-=======
-    printf("[DOOB] Your swapchain is out of bounds\n");
-    DoobWin32Surface win32_surface;
-    {
-        scoped_lock l(global_lock);
-        win32_surface = g_win32_surfaces[pCreateInfo->surface];
->>>>>>> 2c83878 (Removed use of ICD surfaces, overloaded vkCreateWin32Surface instead)
     }
 
     VkDxgiSwapchainCreateInfoDOOB local_dxgi_info = {
@@ -1277,10 +1262,9 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
     }
 
     // create swapchain here 
-    // TODO (Jack):
-    //
-    DOOB_print("HINSTANCE handle = %p\n", win32_surface.hinstance);
-    DOOB_print("HWND handle = %p\n", win32_surface.hwnd);
+    //  
+    DOOB_print("HINSTANCE handle = %p\n", win32_surface->hinstance);
+    DOOB_print("HWND handle = %p\n", win32_surface->hwnd);
 
     *pSwapchain = DOOB_MakeHandle<VkSwapchainKHR>(DOOB_SWAPCHAIN_HANDLE_ID, swapchain_handle);
 
@@ -1553,23 +1537,6 @@ VkResult VKAPI_CALL DOOB_WaitForPresent2KHR(
     return VK_ERROR_UNKNOWN;
 }
 
-VkResult VKAPI_CALL DOOB_CreateWin32SurfaceKHR(
-    VkInstance                                  instance,
-    const VkWin32SurfaceCreateInfoKHR*          pCreateInfo,
-    const VkAllocationCallbacks*                pAllocator,
-    VkSurfaceKHR*                               pSurface) {
-
-    VkResult res;
-    DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, res, CreateWin32SurfaceKHR, (instance, pCreateInfo, pAllocator, pSurface));
-
-    if (res == VK_SUCCESS) {
-        scoped_lock l(global_lock);
-        g_win32_surfaces[*pSurface] = { pCreateInfo->hinstance, pCreateInfo->hwnd };
-    }
-
-    return res;
-}
-
 // ==== OUR CUSTOM FUNCTIONS ====
 
 VkResult VKAPI_CALL DOOB_GetDxgiSwapchainHandleDOOB(
@@ -1614,7 +1581,6 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL DOOB_GetInstanceProcAddr(VkInstanc
     DOOB_GETPROCADDR(CreateDevice);
     DOOB_GETPROCADDR(DestroyInstance);
     DOOB_GETPROCADDR(GetPhysicalDevicePresentRectanglesKHR);
-	DOOB_GETPROCADDR(CreateWin32SurfaceKHR);
 
     PFN_vkVoidFunction result;
     DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, result, GetInstanceProcAddr, (instance, pName));
@@ -1631,7 +1597,6 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL DOOB_GetDeviceProcAddr(VkDevice de
     if (strcmp(pName, "vkGetDxgiSwapchainHandleDOOB") == 0) {
         return (PFN_vkVoidFunction)DOOB_GetDxgiSwapchainHandleDOOB;
     }
-
     bool enabled_extension = false;
     {
         scoped_lock l(global_lock);
