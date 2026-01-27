@@ -43,6 +43,8 @@ target_include_directories(doob-vk-dxgi-swapchain PRIVATE
 add_subdirectory(vendor)
 target_link_libraries(doob-vk-dxgi-swapchain PRIVATE
     Vulkan::LayerSettings
+    D3D11
+    DXGI
 )
 if(MSVC)
   target_compile_options(doob-vk-dxgi-swapchain PRIVATE /W4 /WX /wd4514 /wd4820 /wd4127 /wd4710 /wd4711 /wd4577 /wd4996 /wd5311 /wd4458 /wd4505 /wd4324 /wd4100)

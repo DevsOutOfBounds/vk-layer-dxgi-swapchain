@@ -10,6 +10,8 @@
 #include <unordered_set>
 #include <vector>
 
+#define HR(hr) do { HRESULT _hr = (hr); assert(SUCCEEDED(_hr)); } while (0)
+
 std::mutex global_lock;
 typedef std::lock_guard<std::mutex> scoped_lock;
 
@@ -30,7 +32,6 @@ static DoobRequiredExt REQUIRED_DEVICE_EXTS[] = {
     { VK_KHR_WIN32_KEYED_MUTEX_EXTENSION_NAME, ~0U },
 };
 
-
 // ==== Dispatch table ====
 
 struct DoobSettings {
@@ -49,11 +50,17 @@ struct DoobInstanceConfig {
     uint32_t vk_api_version;
     bool supports_dxgi_ext;
 };
+struct DoobWin32Surface {
+    HINSTANCE hinstance;
+    HWND hwnd;
+};
+
 std::unordered_map<VkInstance, VkLayerInstanceDispatchTable> g_instance_dispatch;
 std::unordered_map<VkInstance, DoobInstanceConfig> g_instance_config;
 std::unordered_map<VkDevice, VkLayerDispatchTable> g_device_dispatch;
 std::unordered_map<VkDevice, DoobDeviceConfig> g_device_config;
 std::unordered_map<VkQueue, VkDevice> g_queue_ownership;
+std::unordered_map<VkSurfaceKHR, DoobWin32Surface> g_win32_surfaces;
 
 #define DOOB_CALL_DISPATCH_TABLE(table, object, retval, fn, params) do { PFN_vk##fn icd_function_call = NULL; \
 { scoped_lock l(global_lock); icd_function_call = table[object].fn; } retval = icd_function_call params; } while (false) 
@@ -347,6 +354,7 @@ VkResult VKAPI_CALL DOOB_CreateInstance(
     ASSIGN_DISPATCH(CreateDevice);
     ASSIGN_DISPATCH(DestroyInstance);
     ASSIGN_DISPATCH(GetPhysicalDevicePresentRectanglesKHR);
+    ASSIGN_DISPATCH(CreateWin32SurfaceKHR);
 
 #undef ASSIGN_DISPATCH
 
@@ -1038,10 +1046,11 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
     };
 
     if (is_dxgi_enabled) {
+        if (dxgi_device_features) {
+            local_dxgi_features = *dxgi_device_features;
+        }
+
         if (global_dxgi_layer_settings.force_enable_dxgi) {
-            if (dxgi_device_features) {
-                local_dxgi_features = *dxgi_device_features;
-            }
             local_dxgi_features.dxgiSwapchain = VK_TRUE;
             if (global_dxgi_layer_settings.force_dxgi_version) {
                 local_dxgi_features.dxgiVersion = global_dxgi_layer_settings.force_dxgi_version_value;
@@ -1113,27 +1122,94 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
         g_device_dispatch[*pDevice] = dispatchTable;
     }
 
+    DOOB_D3D11FactoryInfo factory_info = {};
     if (dxgi_swapchain_enabled) {
         VkPhysicalDeviceIDProperties id_properties = {
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES
         };
-
         VkPhysicalDeviceProperties2 properties2{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
             .pNext = &id_properties,
-        };
+        }; 
         DOOB_GetPhysicalDeviceProperties2(physicalDevice, &properties2);
-        // If this is a CPU device, use the WARP driver!!
-        // Otherwise, the LUID is valid, otherwise the dxgiSwapchain property is set to VK_FALSE!
-        // 
-        // TODO: Create DXGI factory and device
-        // Make sure to return the appropriate errors if error occur!
+        
+        if (id_properties.deviceLUIDValid == VK_FALSE) {
+            return VK_ERROR_FEATURE_NOT_PRESENT;
+        }
+        LUID vk_win32_luid;
+        memcpy(&vk_win32_luid, id_properties.deviceLUID, sizeof(LUID));
 
+
+        // Factory
+        UINT factory_flags = 0;
+        #ifdef _DEBUG
+        factory_flags |= DXGI_CREATE_FACTORY_DEBUG;
+        #endif
+        HR(CreateDXGIFactory2(factory_flags, IID_PPV_ARGS(&factory_info.dxgi_factory)));
+
+        // Device
+        // TODO: Support WARP driver
+        bool has_found_adapter = false;
+        for (UINT i = 0;; ++i) {
+            IDXGIAdapter1* adapter = nullptr;
+            if (FAILED(factory_info.dxgi_factory->EnumAdapters1(i, &adapter))) {
+                break;
+            }
+
+            DXGI_ADAPTER_DESC1 adapter_desc;
+            adapter->GetDesc1(&adapter_desc);
+
+            if (adapter_desc.AdapterLuid.LowPart != vk_win32_luid.LowPart ||
+                adapter_desc.AdapterLuid.HighPart != vk_win32_luid.HighPart) {
+                adapter->Release();
+                continue;
+            }
+
+            if (adapter_desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
+                adapter->Release();
+                continue;
+            }
+
+            UINT flags = 0;
+            #ifdef _DEBUG
+            flags |= D3D11_CREATE_DEVICE_DEBUG;
+            #endif
+            D3D_FEATURE_LEVEL feature_levels[] = { D3D_FEATURE_LEVEL_11_0 };
+            D3D_FEATURE_LEVEL picked_feature_level;
+
+            if (FAILED(D3D11CreateDevice(
+                adapter,
+                D3D_DRIVER_TYPE_UNKNOWN,
+                nullptr,
+                flags,
+                feature_levels,
+                _countof(feature_levels),
+                D3D11_SDK_VERSION,
+                &factory_info.device,
+                &picked_feature_level,
+                &factory_info.device_context
+            ))) {
+                adapter->Release();
+                continue;
+            }
+            assert(picked_feature_level >= D3D_FEATURE_LEVEL_11_0);
+
+            has_found_adapter = true;
+            adapter->Release();
+            break;
+        }
+
+        if (!has_found_adapter) {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
     }
     {
         scoped_lock l(global_lock);
-        g_device_config[*pDevice].dxgi_swapchain_feature_enabled = dxgi_swapchain_enabled;
-        g_device_config[*pDevice].dxgi_swapchain_extension_enabled = is_dxgi_enabled;
+        g_device_config[*pDevice] = {
+            .dxgi_swapchain_extension_enabled = is_dxgi_enabled,
+            .dxgi_swapchain_feature_enabled = dxgi_swapchain_enabled,
+            .factory_info = factory_info
+        };
     }
     return VK_SUCCESS;
 }
@@ -1234,11 +1310,6 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
 
     DOOB_print("[DOOB] Your swapchain is out of bounds\n");
 
-    VkIcdSurfaceWin32* win32_surface = (VkIcdSurfaceWin32*)pCreateInfo->surface;
-    if (win32_surface->base.platform != VK_ICD_WSI_PLATFORM_WIN32) {
-        return VK_ERROR_INITIALIZATION_FAILED;
-    }
-
     VkDxgiSwapchainCreateInfoDOOB local_dxgi_info = {
         .sType = VK_STRUCTURE_TYPE_DXGI_SWAPCHAIN_CREATE_INFO_DOOB,
         .swapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD,
@@ -1261,10 +1332,45 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     }
 
-    // create swapchain here 
-    //  
-    DOOB_print("HINSTANCE handle = %p\n", win32_surface->hinstance);
-    DOOB_print("HWND handle = %p\n", win32_surface->hwnd);
+    DoobDeviceConfig device_config;
+    DoobWin32Surface win32_surface;
+    {
+        scoped_lock l(global_lock);
+        device_config = g_device_config[device];
+        win32_surface = g_win32_surfaces[pCreateInfo->surface];
+    }
+    DXGI_SWAP_CHAIN_DESC1 swapchain_desc = {
+        .Width = pCreateInfo->imageExtent.width,
+        .Height = pCreateInfo->imageExtent.height,
+        .Format = DXGI_FORMAT_B8G8R8A8_UNORM, // TODO: Make dynamic
+        .Stereo = FALSE,
+        .SampleDesc = {.Count = 1, .Quality = 0 },
+        .BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT,
+        .BufferCount = pCreateInfo->minImageCount,
+        .Scaling = DXGI_SCALING_NONE,
+        .SwapEffect = local_dxgi_info.swapEffect,
+        .AlphaMode = DXGI_ALPHA_MODE_IGNORE,
+        .Flags = 0
+    };
+
+    DOOB_D3D11FactoryInfo factory_info = device_config.factory_info;
+
+    HR(device_config.factory_info.dxgi_factory->CreateSwapChainForHwnd(
+        factory_info.device,
+        win32_surface.hwnd,
+        &swapchain_desc,
+        nullptr,
+        nullptr,
+        &swapchain_obj->swapchain
+    ));
+    swapchain_obj->swapchain_image_count = swapchain_desc.BufferCount;
+
+    HR(swapchain_obj->swapchain->GetBuffer(0, IID_PPV_ARGS(&swapchain_obj->swapchain_backbuffer)));
+    HR(factory_info.device->CreateRenderTargetView(
+        swapchain_obj->swapchain_backbuffer,
+        nullptr,
+        &swapchain_obj->swapchain_rtv
+    ));
 
     *pSwapchain = DOOB_MakeHandle<VkSwapchainKHR>(DOOB_SWAPCHAIN_HANDLE_ID, swapchain_handle);
 
@@ -1537,6 +1643,23 @@ VkResult VKAPI_CALL DOOB_WaitForPresent2KHR(
     return VK_ERROR_UNKNOWN;
 }
 
+VkResult VKAPI_CALL DOOB_CreateWin32SurfaceKHR(
+    VkInstance                                  instance,
+    const VkWin32SurfaceCreateInfoKHR* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkSurfaceKHR* pSurface) {
+
+    VkResult res;
+    DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, res, CreateWin32SurfaceKHR, (instance, pCreateInfo, pAllocator, pSurface));
+
+    if (res == VK_SUCCESS) {
+        scoped_lock l(global_lock);
+        g_win32_surfaces[*pSurface] = { pCreateInfo->hinstance, pCreateInfo->hwnd };
+    }
+
+    return res;
+}
+
 // ==== OUR CUSTOM FUNCTIONS ====
 
 VkResult VKAPI_CALL DOOB_GetDxgiSwapchainHandleDOOB(
@@ -1581,6 +1704,7 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL DOOB_GetInstanceProcAddr(VkInstanc
     DOOB_GETPROCADDR(CreateDevice);
     DOOB_GETPROCADDR(DestroyInstance);
     DOOB_GETPROCADDR(GetPhysicalDevicePresentRectanglesKHR);
+    DOOB_GETPROCADDR(CreateWin32SurfaceKHR);
 
     PFN_vkVoidFunction result;
     DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, result, GetInstanceProcAddr, (instance, pName));
