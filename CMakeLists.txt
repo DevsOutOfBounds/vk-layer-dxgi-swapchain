@@ -1,4 +1,4 @@
-﻿cmake_minimum_required (VERSION 3.10)
+cmake_minimum_required (VERSION 3.10)
 
 if(NOT WIN32)
   message(FATAL_ERROR "This vulkan layer is only supported on Windows platforms!")
@@ -52,7 +52,7 @@ endif()
 
 add_custom_command(
     TARGET doob-vk-dxgi-swapchain POST_BUILD
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/gen_manifest.py --output_json ${CMAKE_CURRENT_BINARY_DIR}/VkLayerDoob_dxgi_swapchain.json --library_name doob-vk-dxgi-swapchain 
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/gen_manifest.py --output_json ${CMAKE_CURRENT_BINARY_DIR}/VkLayerDoob_dxgi_swapchain.json --library_name doob-vk-dxgi-swapchain 
     COMMENT "Generating Layer Manifest"
 )
 
