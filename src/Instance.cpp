@@ -11,10 +11,33 @@
 #include <vector>
 
 #define HR(hr) do { HRESULT _hr = (hr); assert(SUCCEEDED(_hr)); } while (0)
+#define MUTEX_KEY_VULKAN 0
+#define MUTEX_KEY_D3D11  1
 
 std::mutex global_lock;
 typedef std::lock_guard<std::mutex> scoped_lock;
 
+// TODO: TEMPORARY LOCATION
+#include <d3d11.h>
+#include <dxgi1_6.h>
+#include "D3D11FactoryInfo.h"
+
+struct DOOB_DxgiSwapchain {
+    DOOB_D3D11FactoryInfo* dxgi_factory_info;
+
+    IDXGISwapChain1* swapchain;
+    ID3D11Texture2D* swapchain_backbuffer;
+    ID3D11RenderTargetView* swapchain_rtv;
+    size_t swapchain_image_count;
+
+    ID3D11Texture2D* shared_intermediate_tex;
+    HANDLE shared_intermediate_handle;
+    IDXGIKeyedMutex* shared_keyed_mutex;
+
+    VkImage vk_mirrored_shared_image;
+    VkDeviceMemory vk_mirrored_shared_image_memory;
+};
+//
 
 struct DoobRequiredExt {
     const char* name;
@@ -59,6 +82,7 @@ std::unordered_map<VkInstance, VkLayerInstanceDispatchTable> g_instance_dispatch
 std::unordered_map<VkInstance, DoobInstanceConfig> g_instance_config;
 std::unordered_map<VkDevice, VkLayerDispatchTable> g_device_dispatch;
 std::unordered_map<VkDevice, DoobDeviceConfig> g_device_config;
+std::unordered_map<VkDevice, VkPhysicalDevice> g_device_to_physical;
 std::unordered_map<VkQueue, VkDevice> g_queue_ownership;
 std::unordered_map<VkSurfaceKHR, DoobWin32Surface> g_win32_surfaces;
 
@@ -212,6 +236,66 @@ static DoobSettings DOOB_LoadSettings() {
     return s;
 }
 
+static constexpr DXGI_FORMAT DOOB_DXGIFormat_FromVkFormat(VkFormat format) {
+    switch (format) {
+        case VK_FORMAT_R8_UNORM:            return DXGI_FORMAT_R8_UNORM;
+        case VK_FORMAT_R8_SNORM:            return DXGI_FORMAT_R8_SNORM;
+        case VK_FORMAT_R8_UINT:             return DXGI_FORMAT_R8_UINT;
+        case VK_FORMAT_R8_SINT:             return DXGI_FORMAT_R8_SINT;
+
+        case VK_FORMAT_R8G8_UNORM:          return DXGI_FORMAT_R8G8_UNORM;
+        case VK_FORMAT_R8G8_SNORM:          return DXGI_FORMAT_R8G8_SNORM;
+        case VK_FORMAT_R8G8_UINT:           return DXGI_FORMAT_R8G8_UINT;
+        case VK_FORMAT_R8G8_SINT:           return DXGI_FORMAT_R8G8_SINT;
+
+        case VK_FORMAT_R8G8B8A8_UNORM:      return DXGI_FORMAT_R8G8B8A8_UNORM;
+        case VK_FORMAT_R8G8B8A8_SNORM:      return DXGI_FORMAT_R8G8B8A8_SNORM;
+        case VK_FORMAT_R8G8B8A8_UINT:       return DXGI_FORMAT_R8G8B8A8_UINT;
+        case VK_FORMAT_R8G8B8A8_SINT:       return DXGI_FORMAT_R8G8B8A8_SINT;
+        case VK_FORMAT_R8G8B8A8_SRGB:       return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+
+        case VK_FORMAT_B8G8R8A8_UNORM:      return DXGI_FORMAT_B8G8R8A8_UNORM;
+        case VK_FORMAT_B8G8R8A8_SRGB:       return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+
+        case VK_FORMAT_R16_UNORM:           return DXGI_FORMAT_R16_UNORM;
+        case VK_FORMAT_R16_SNORM:           return DXGI_FORMAT_R16_SNORM;
+        case VK_FORMAT_R16_UINT:            return DXGI_FORMAT_R16_UINT;
+        case VK_FORMAT_R16_SINT:            return DXGI_FORMAT_R16_SINT;
+        case VK_FORMAT_R16_SFLOAT:          return DXGI_FORMAT_R16_FLOAT;
+
+        case VK_FORMAT_R16G16_UNORM:        return DXGI_FORMAT_R16G16_UNORM;
+        case VK_FORMAT_R16G16_SNORM:        return DXGI_FORMAT_R16G16_SNORM;
+        case VK_FORMAT_R16G16_UINT:         return DXGI_FORMAT_R16G16_UINT;
+        case VK_FORMAT_R16G16_SINT:         return DXGI_FORMAT_R16G16_SINT;
+        case VK_FORMAT_R16G16_SFLOAT:       return DXGI_FORMAT_R16G16_FLOAT;
+
+        case VK_FORMAT_R16G16B16A16_UNORM:  return DXGI_FORMAT_R16G16B16A16_UNORM;
+        case VK_FORMAT_R16G16B16A16_SNORM:  return DXGI_FORMAT_R16G16B16A16_SNORM;
+        case VK_FORMAT_R16G16B16A16_UINT:   return DXGI_FORMAT_R16G16B16A16_UINT;
+        case VK_FORMAT_R16G16B16A16_SINT:   return DXGI_FORMAT_R16G16B16A16_SINT;
+        case VK_FORMAT_R16G16B16A16_SFLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+
+        case VK_FORMAT_R32_UINT:            return DXGI_FORMAT_R32_UINT;
+        case VK_FORMAT_R32_SINT:            return DXGI_FORMAT_R32_SINT;
+        case VK_FORMAT_R32_SFLOAT:          return DXGI_FORMAT_R32_FLOAT;
+
+        case VK_FORMAT_R32G32_UINT:         return DXGI_FORMAT_R32G32_UINT;
+        case VK_FORMAT_R32G32_SINT:         return DXGI_FORMAT_R32G32_SINT;
+        case VK_FORMAT_R32G32_SFLOAT:       return DXGI_FORMAT_R32G32_FLOAT;
+
+        case VK_FORMAT_R32G32B32A32_UINT:   return DXGI_FORMAT_R32G32B32A32_UINT;
+        case VK_FORMAT_R32G32B32A32_SINT:   return DXGI_FORMAT_R32G32B32A32_SINT;
+        case VK_FORMAT_R32G32B32A32_SFLOAT: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+
+        case VK_FORMAT_D16_UNORM:           return DXGI_FORMAT_D16_UNORM;
+        case VK_FORMAT_D32_SFLOAT:          return DXGI_FORMAT_D32_FLOAT;
+        case VK_FORMAT_D24_UNORM_S8_UINT:   return DXGI_FORMAT_D24_UNORM_S8_UINT;
+        case VK_FORMAT_D32_SFLOAT_S8_UINT:  return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+
+        default:                            return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
 
 VkResult VKAPI_CALL DOOB_EnumerateInstanceLayerProperties(
     uint32_t* pPropertyCount,
@@ -344,6 +428,7 @@ VkResult VKAPI_CALL DOOB_CreateInstance(
     ASSIGN_DISPATCH(GetPhysicalDeviceProperties2);
     ASSIGN_DISPATCH(GetPhysicalDeviceFeatures2KHR);
     ASSIGN_DISPATCH(GetPhysicalDeviceFeatures2);
+    ASSIGN_DISPATCH(GetPhysicalDeviceMemoryProperties);
     ASSIGN_DISPATCH(GetPhysicalDeviceSurfaceCapabilitiesKHR);
     ASSIGN_DISPATCH(GetPhysicalDeviceSurfaceCapabilities2KHR);
     ASSIGN_DISPATCH(GetPhysicalDeviceSurfaceCapabilities2EXT);
@@ -905,7 +990,6 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
 {
     VkLayerDeviceCreateInfo* layerCreateInfo = (VkLayerDeviceCreateInfo*)pCreateInfo->pNext;
 
-
     VkInstance instance;
     uint32_t enabled_api_version = 0;
     bool supports_dxgi_ext = false;
@@ -1081,6 +1165,10 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
     if (ret != VK_SUCCESS) {
         return ret;
     }
+    {
+        scoped_lock l(global_lock);
+        g_device_to_physical[*pDevice] = physicalDevice;
+    }
 
 #define ASSIGN_DISPATCH(fn) dispatchTable.fn = (PFN_vk##fn)gdpa(*pDevice, "vk"#fn) 
 
@@ -1114,6 +1202,14 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
     ASSIGN_DISPATCH(SetSwapchainPresentTimingQueueSizeEXT);
     ASSIGN_DISPATCH(WaitForPresentKHR);
     ASSIGN_DISPATCH(WaitForPresent2KHR);
+	ASSIGN_DISPATCH(CreateImage);
+	ASSIGN_DISPATCH(GetImageMemoryRequirements2);
+	ASSIGN_DISPATCH(AllocateMemory);
+	ASSIGN_DISPATCH(BindImageMemory);
+	ASSIGN_DISPATCH(CreateFence);
+	ASSIGN_DISPATCH(DestroyFence);
+	ASSIGN_DISPATCH(QueueSubmit);
+	ASSIGN_DISPATCH(WaitForFences);
 
 #undef ASSIGN_DISPATCH
     // store the table by key
@@ -1297,6 +1393,39 @@ VkResult VKAPI_CALL DOOB_QueuePresentKHR(
             // DXGI PRESENT HERE
             // NOTE: how to deal with the pWaitSemaphores?
             // pPresentInfo->pResults[i] = ...
+            uint64_t win32_acquire_key = MUTEX_KEY_VULKAN;
+            uint64_t win32_release_key = MUTEX_KEY_D3D11;
+            uint32_t win32_acquire_timeout = UINT32_MAX;
+            VkWin32KeyedMutexAcquireReleaseInfoKHR win32_keyed_mutex_acquire_release_info = {
+                .sType = VK_STRUCTURE_TYPE_WIN32_KEYED_MUTEX_ACQUIRE_RELEASE_INFO_KHR,
+                .acquireCount = 1,
+                .pAcquireSyncs = &doob_sc->vk_mirrored_shared_image_memory,
+                .pAcquireKeys = &win32_acquire_key,
+                .pAcquireTimeouts = &win32_acquire_timeout,
+                .releaseCount = 1,
+                .pReleaseSyncs = &doob_sc->vk_mirrored_shared_image_memory,
+                .pReleaseKeys = &win32_release_key
+            };
+
+            VkSubmitInfo submit_info = {
+                .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                .pNext = &win32_keyed_mutex_acquire_release_info,
+                .commandBufferCount = 0,
+                .pCommandBuffers = nullptr
+            };
+
+            // TEMPORARY FENCE
+            VkFence fence;
+            VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+            VkResult res;
+			DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, CreateFence, (device, &fence_info, nullptr, &fence));
+			assert(res == VK_SUCCESS);
+
+            DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, QueueSubmit, (queue, 1, &submit_info, fence));
+            assert(res == VK_SUCCESS);
+            DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, WaitForFences, (device, 1, &fence, VK_TRUE, UINT64_MAX));
+            assert(res == VK_SUCCESS);
+            DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, DestroyFence, (device, fence, nullptr));
         }
     }
     return VK_SUCCESS;
@@ -1342,7 +1471,7 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
     DXGI_SWAP_CHAIN_DESC1 swapchain_desc = {
         .Width = pCreateInfo->imageExtent.width,
         .Height = pCreateInfo->imageExtent.height,
-        .Format = DXGI_FORMAT_B8G8R8A8_UNORM, // TODO: Make dynamic
+        .Format = DOOB_DXGIFormat_FromVkFormat(pCreateInfo->imageFormat),
         .Stereo = FALSE,
         .SampleDesc = {.Count = 1, .Quality = 0 },
         .BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT,
@@ -1372,10 +1501,125 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
         &swapchain_obj->swapchain_rtv
     ));
 
+    // Create shared texture handle
+    // TODO: Not sure if this should be created elsewhere, but for now it will have to do
+    // TODO: There's also a question of how this will work with multiple frames in flight? In such cases we must have multiple shared textures
+    //       Perhaps it would be smart to have a num_frames_in_flight field in the pNext struct?
+    // TODO: Sync the texture desc with the Vulkan desc
+    D3D11_TEXTURE2D_DESC shared_tex_desc = {
+        .Width = swapchain_desc.Width,
+        .Height = swapchain_desc.Height,
+        .MipLevels = 1,
+        .ArraySize = 1,
+        .Format = swapchain_desc.Format,
+        .SampleDesc = {.Count = 1, .Quality = 0 },
+        .Usage = D3D11_USAGE_DEFAULT,
+        .BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+        .CPUAccessFlags = 0,
+        .MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX
+    };
+
+    HR(factory_info.device->CreateTexture2D(&shared_tex_desc, nullptr, &swapchain_obj->shared_intermediate_tex));
+
+    IDXGIResource1* dxgi_resource = nullptr;
+    HR(swapchain_obj->shared_intermediate_tex->QueryInterface(IID_PPV_ARGS(&dxgi_resource)));
+    HR(dxgi_resource->CreateSharedHandle(
+        nullptr,
+        DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+        nullptr,
+        &swapchain_obj->shared_intermediate_handle
+    ));
+    HR(swapchain_obj->shared_intermediate_tex->QueryInterface(IID_PPV_ARGS(&swapchain_obj->shared_keyed_mutex)));
+
+    // TODO: We should probably move this to GetSwapchainImagesKHR
+    // Create VkImage object from the shared tex
+    VkExternalMemoryImageCreateInfo external_memory_image_info = {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT
+    };
+    VkImageCreateInfo image_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = &external_memory_image_info,
+        .flags = 0,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = pCreateInfo->imageFormat, // TODO: Convert to VK format
+        .extent = { pCreateInfo->imageExtent.width, pCreateInfo->imageExtent.width, 1 },
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
+    };
+    //VkAccessFlags2 access_flags = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    // TODO: Add more access flags depending on what the user wants? Might want to add VK_IMAGE_USAGE_SAMPLED_BIT?
+
+    VkResult res;
+    DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, CreateImage, (device, &image_info, nullptr, &swapchain_obj->vk_mirrored_shared_image));
+    assert(res == VK_SUCCESS);
+
+    VkMemoryPropertyFlags mem_flags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    VkPhysicalDeviceMemoryProperties mem_props;
+
+    VkImageMemoryRequirementsInfo2 mem_reqs_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2,
+        .pNext = nullptr,
+        .image = swapchain_obj->vk_mirrored_shared_image
+    };
+    VkMemoryDedicatedRequirements mem_dedicated_reqs = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS
+    };
+    VkMemoryRequirements2 mem_reqs2 = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
+        .pNext = &mem_dedicated_reqs
+    };
+
+    VkPhysicalDevice physical_device;
+    {
+        scoped_lock l(global_lock);
+        physical_device = g_device_to_physical[device];
+    }
+
+    DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, GetImageMemoryRequirements2, (device, &mem_reqs_info, &mem_reqs2));
+    VkInstance instance = DOOB_GetInstanceFromPhysicalDevice(physical_device);
+    DOOB_CALL_VOID_DISPATCH_TABLE(g_instance_dispatch, instance, GetPhysicalDeviceMemoryProperties, (physical_device, &mem_props));
+
+    bool found_mem_type = false;
+    uint32_t mem_type_idx = 0;
+    for (uint32_t i = 0; i < mem_props.memoryTypeCount; ++i) {
+        if ((mem_reqs2.memoryRequirements.memoryTypeBits & (1 << i)) && ((mem_props.memoryTypes[i].propertyFlags & mem_flags) == mem_flags)) {
+            mem_type_idx = i;
+            found_mem_type = true;
+            break;
+        }
+    }
+    assert(found_mem_type); // TODO: Fallback?
+    VkMemoryDedicatedAllocateInfo dedicated_alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+        .image = swapchain_obj->vk_mirrored_shared_image
+    };
+    VkImportMemoryWin32HandleInfoKHR import_win32_handle_info = {
+        .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_WIN32_HANDLE_INFO_KHR,
+        .pNext = &dedicated_alloc_info,
+        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT,
+        .handle = swapchain_obj->shared_intermediate_handle
+    };
+    VkMemoryAllocateInfo mem_alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = &import_win32_handle_info,
+        .memoryTypeIndex = mem_type_idx
+    };
+    DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, AllocateMemory, (device, &mem_alloc_info, nullptr, &swapchain_obj->vk_mirrored_shared_image_memory));
+    assert(res == VK_SUCCESS);
+    DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, BindImageMemory, (device, swapchain_obj->vk_mirrored_shared_image, swapchain_obj->vk_mirrored_shared_image_memory, 0));
+    assert(res == VK_SUCCESS);
+
     *pSwapchain = DOOB_MakeHandle<VkSwapchainKHR>(DOOB_SWAPCHAIN_HANDLE_ID, swapchain_handle);
 
     return VK_SUCCESS;
 }
+
 VkResult VKAPI_CALL DOOB_CreateSharedSwapchainsKHR(
     VkDevice                                    device,
     uint32_t                                    swapchainCount,
@@ -1418,8 +1662,15 @@ VkResult VKAPI_CALL DOOB_GetSwapchainImagesKHR(
         return vkresult;
     }
 
+    if (pSwapchainImages == nullptr) {
+        *pSwapchainImageCount = 1; // See comment below
+        return VK_SUCCESS;
+    }
 
-    // swapchain_obj->...
+    // TODO: We will see how we enforce this later, pSwapchainImageCount should instead be the number of FIF I think?
+    assert(*pSwapchainImageCount == 1);
+
+
 
     return VK_ERROR_UNKNOWN;
 }
@@ -1569,6 +1820,7 @@ VkResult VKAPI_CALL DOOB_LatencySleepNV(
 
     return VK_ERROR_UNKNOWN;
 }
+
 VkResult VKAPI_CALL DOOB_ReleaseFullScreenExclusiveModeEXT(
     VkDevice                                    device,
     VkSwapchainKHR                              swapchain) {
