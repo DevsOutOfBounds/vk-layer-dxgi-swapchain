@@ -23,7 +23,7 @@ typedef std::lock_guard<std::mutex> scoped_lock;
 #include "D3D11FactoryInfo.h"
 
 struct DOOB_DxgiSwapchain {
-    DOOB_D3D11FactoryInfo* dxgi_factory_info;
+    DOOB_D3D11FactoryInfo dxgi_factory_info;
 
     IDXGISwapChain1* swapchain;
     ID3D11Texture2D* swapchain_backbuffer;
@@ -1426,6 +1426,26 @@ VkResult VKAPI_CALL DOOB_QueuePresentKHR(
             DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, WaitForFences, (device, 1, &fence, VK_TRUE, UINT64_MAX));
             assert(res == VK_SUCCESS);
             DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, DestroyFence, (device, fence, nullptr));
+
+            // D3D11 Present
+            DOOB_D3D11FactoryInfo dx11_factory_info = doob_sc->dxgi_factory_info;
+
+            DXGI_SWAP_CHAIN_DESC1 swapchain_desc;
+            HR(doob_sc->swapchain->GetDesc1(&swapchain_desc));
+			D3D11_VIEWPORT viewport = { // TODO: Query the current Vulkan viewport?
+	            .TopLeftX = 0,
+	            .TopLeftY = 0,
+	            .Width = (FLOAT)swapchain_desc.Width,
+	            .Height = (FLOAT)swapchain_desc.Height,
+	            .MinDepth = 0.0f,
+	            .MaxDepth = 1.0f
+			};
+			dx11_factory_info.device_context->RSSetViewports(1, &viewport);
+
+			HR(doob_sc->shared_keyed_mutex->AcquireSync(MUTEX_KEY_D3D11, INFINITE));
+            dx11_factory_info.device_context->CopyResource(doob_sc->swapchain_backbuffer, doob_sc->shared_intermediate_tex);
+			HR(doob_sc->swapchain->Present(1, 0));
+			HR(doob_sc->shared_keyed_mutex->ReleaseSync(MUTEX_KEY_VULKAN));
         }
     }
     return VK_SUCCESS;
@@ -1493,6 +1513,7 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
         &swapchain_obj->swapchain
     ));
     swapchain_obj->swapchain_image_count = swapchain_desc.BufferCount;
+    swapchain_obj->dxgi_factory_info = factory_info;
 
     HR(swapchain_obj->swapchain->GetBuffer(0, IID_PPV_ARGS(&swapchain_obj->swapchain_backbuffer)));
     HR(factory_info.device->CreateRenderTargetView(
@@ -1548,12 +1569,10 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
         .arrayLayers = 1,
         .samples = VK_SAMPLE_COUNT_1_BIT,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
     };
-    //VkAccessFlags2 access_flags = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    // TODO: Add more access flags depending on what the user wants? Might want to add VK_IMAGE_USAGE_SAMPLED_BIT?
 
     VkResult res;
     DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, CreateImage, (device, &image_info, nullptr, &swapchain_obj->vk_mirrored_shared_image));
@@ -1663,16 +1682,14 @@ VkResult VKAPI_CALL DOOB_GetSwapchainImagesKHR(
     }
 
     if (pSwapchainImages == nullptr) {
-        *pSwapchainImageCount = 1; // See comment below
+        *pSwapchainImageCount = (uint32_t)swapchain_obj->swapchain_image_count;
         return VK_SUCCESS;
     }
 
-    // TODO: We will see how we enforce this later, pSwapchainImageCount should instead be the number of FIF I think?
-    assert(*pSwapchainImageCount == 1);
-
-
-
-    return VK_ERROR_UNKNOWN;
+    for (uint32_t i = 0; i < *pSwapchainImageCount; ++i) {
+        pSwapchainImages[i] = swapchain_obj->vk_mirrored_shared_image;
+    }
+    return VK_SUCCESS;
 }
 
 VkResult VKAPI_CALL DOOB_GetSwapchainStatusKHR(
