@@ -54,14 +54,16 @@ struct DoobRequiredExt {
 static DoobRequiredExt REQUIRED_INSTANCE_EXTS[] = {
     { VK_KHR_SURFACE_EXTENSION_NAME, ~0U  },
     { VK_KHR_WIN32_SURFACE_EXTENSION_NAME, ~0U  },
-    { VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME, VK_VERSION_1_1 },
-    { VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME, VK_VERSION_1_1 },
+    { VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME, VK_API_VERSION_1_1 },
+    { VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME, VK_API_VERSION_1_1 },
 };
 
 static DoobRequiredExt REQUIRED_DEVICE_EXTS[] = {
     { VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME, ~0U },
     { VK_KHR_WIN32_KEYED_MUTEX_EXTENSION_NAME, ~0U },
+    { VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME, VK_API_VERSION_1_1 },
 };
+
 
 // ==== Dispatch table ====
 
@@ -1256,7 +1258,7 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
 
     // vulkan functios we rely on!
     ASSIGN_DISPATCH(CreateImage);
-    ASSIGN_DISPATCH(GetImageMemoryRequirements2);
+    ASSIGN_DISPATCH(GetImageMemoryRequirements2KHR);
     ASSIGN_DISPATCH(AllocateMemory);
     ASSIGN_DISPATCH(BindImageMemory);
     ASSIGN_DISPATCH(CreateFence);
@@ -1759,7 +1761,7 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
         physical_device = g_device_to_physical[device];
     }
 
-    DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, GetImageMemoryRequirements2, (device, &mem_reqs_info, &mem_reqs2));
+    DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, GetImageMemoryRequirements2KHR, (device, &mem_reqs_info, &mem_reqs2));
     VkInstance instance = DOOB_GetInstanceFromPhysicalDevice(physical_device);
     DOOB_CALL_VOID_DISPATCH_TABLE(g_instance_dispatch, instance, GetPhysicalDeviceMemoryProperties, (physical_device, &mem_props));
 
