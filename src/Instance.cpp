@@ -1456,100 +1456,103 @@ VkResult VKAPI_CALL DOOB_QueuePresentKHR(
 
         DOOB_print("swapchain %p\n", doob_sc);
         if (doob_sc) {
-            uint32_t image_idx = pPresentInfo->pImageIndices[i];
-            if (image_idx >= doob_sc->sync_command_buffers.size()) return VK_ERROR_OUT_OF_DATE_KHR;
-            DOOB_print("recording commands %i/%i\n", (int)image_idx, (int)doob_sc->sync_command_buffers.size());
-            VkCommandBuffer sync_commands = doob_sc->sync_command_buffers[image_idx];
-            {
-                // FIXME: why are validation layers crashing here????
-                VkCommandBufferBeginInfo begin_info = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+            static constexpr bool ENABLE_SYNC_VK = true; // debugging on intel
+            static constexpr bool ENABLE_SYNC_DX = true; 
+            if (ENABLE_SYNC_VK) {
+                uint32_t image_idx = pPresentInfo->pImageIndices[i];
+                if (image_idx >= doob_sc->sync_command_buffers.size()) return VK_ERROR_OUT_OF_DATE_KHR;
+                DOOB_print("recording commands %i/%i\n", (int)image_idx, (int)doob_sc->sync_command_buffers.size());
+                VkCommandBuffer sync_commands = doob_sc->sync_command_buffers[image_idx];
+                {
+                    // FIXME: why are validation layers crashing here????
+                    VkCommandBufferBeginInfo begin_info = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+                    VkResult res;
+                    DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, ResetCommandBuffer, (sync_commands, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT));
+                    DOOB_print("ResetCommandBuffer %i\n", res);
+                    DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, BeginCommandBuffer, (sync_commands, &begin_info));
+                    DOOB_print("BeginCommandBuffer %i\n", res);
+                    if (res != VK_SUCCESS) {
+                        return res;
+                    }
+                    VkImageMemoryBarrier img_barrier = {
+                        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                        .srcAccessMask = waitAccess,
+                        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
+                        .oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                        .image = doob_sc->vk_mirrored_shared_image,
+                        .subresourceRange = {
+                            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                            .levelCount = 1,
+                            .layerCount = 1
+                        },
+                    };
+                    VkMemoryBarrier barrier = {
+                        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                        .srcAccessMask = waitAccess,
+                        .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT
+                    };
+                    DOOB_print("pipeline barrier\n");
+                    DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, CmdPipelineBarrier, (
+                        sync_commands,
+                        waitStage,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        0,
+                        1, &barrier,
+                        0, nullptr,
+                        1, &img_barrier
+                        ));
+
+                    DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, EndCommandBuffer, (sync_commands));
+                    DOOB_print("EndCommandBuffer %i\n", res);
+                    if (res != VK_SUCCESS) {
+                        return res;
+                    }
+                }
+                DOOB_print("submitting\n");
+                uint64_t win32_acquire_key = MUTEX_KEY_VULKAN;
+                uint64_t win32_release_key = MUTEX_KEY_D3D11;
+                uint32_t win32_acquire_timeout = UINT32_MAX;
+                VkWin32KeyedMutexAcquireReleaseInfoKHR win32_keyed_mutex_acquire_release_info = {
+                    .sType = VK_STRUCTURE_TYPE_WIN32_KEYED_MUTEX_ACQUIRE_RELEASE_INFO_KHR,
+                    .acquireCount = 1,
+                    .pAcquireSyncs = &doob_sc->vk_mirrored_shared_image_memory,
+                    .pAcquireKeys = &win32_acquire_key,
+                    .pAcquireTimeouts = &win32_acquire_timeout,
+                    .releaseCount = 1,
+                    .pReleaseSyncs = &doob_sc->vk_mirrored_shared_image_memory,
+                    .pReleaseKeys = &win32_release_key
+                };
+                VkSubmitInfo submit_info = {
+                    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                    .pNext = &win32_keyed_mutex_acquire_release_info,
+                    .waitSemaphoreCount = pPresentInfo->waitSemaphoreCount,
+                    .pWaitSemaphores = pPresentInfo->pWaitSemaphores,
+                    .pWaitDstStageMask = wait_dst_mask.data(), // See fix below
+                    .commandBufferCount = 1,
+                    .pCommandBuffers = &sync_commands,
+                };
+
+                // TEMPORARY FENCE
+                VkFence fence;
+                VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
                 VkResult res;
-                DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, ResetCommandBuffer, (sync_commands, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT));
-                DOOB_print("ResetCommandBuffer %i\n", res);
-                DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, BeginCommandBuffer, (sync_commands, &begin_info));
-                DOOB_print("BeginCommandBuffer %i\n", res);
+                DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, CreateFence, (device, &fence_info, nullptr, &fence));
                 if (res != VK_SUCCESS) {
-                    return res;
+                    return VK_ERROR_DEVICE_LOST;
                 }
-                VkImageMemoryBarrier img_barrier = {
-                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-                    .srcAccessMask = waitAccess,
-                    .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
-                    .oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                    .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-                    .image = doob_sc->vk_mirrored_shared_image,
-                    .subresourceRange = {
-                        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                        .levelCount = 1,
-                        .layerCount = 1
-                    },
-                };
-                VkMemoryBarrier barrier = {
-                    .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-                    .srcAccessMask = waitAccess,
-                    .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT
-                };
-                DOOB_print("pipeline barrier\n");
-                DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, CmdPipelineBarrier, (
-                    sync_commands,
-                    waitStage,
-                    VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                    0,
-                    1, &barrier,
-                    0, nullptr,
-                    1, &img_barrier
-                    ));
-
-                DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, EndCommandBuffer, (sync_commands));
-                DOOB_print("EndCommandBuffer %i\n", res);
+                DOOB_print("submission\n");
+                DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, QueueSubmit, (queue, 1, &submit_info, fence));
                 if (res != VK_SUCCESS) {
-                    return res;
+                    return VK_ERROR_DEVICE_LOST;
                 }
+                DOOB_print("ready to to dxgi!\n");
+                DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, WaitForFences, (device, 1, &fence, VK_TRUE, UINT64_MAX));
+                if (res != VK_SUCCESS) {
+                    return VK_ERROR_DEVICE_LOST;
+                }
+                DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, DestroyFence, (device, fence, nullptr));
             }
-            DOOB_print("submitting\n");
-            uint64_t win32_acquire_key = MUTEX_KEY_VULKAN;
-            uint64_t win32_release_key = MUTEX_KEY_D3D11;
-            uint32_t win32_acquire_timeout = UINT32_MAX;
-            VkWin32KeyedMutexAcquireReleaseInfoKHR win32_keyed_mutex_acquire_release_info = {
-                .sType = VK_STRUCTURE_TYPE_WIN32_KEYED_MUTEX_ACQUIRE_RELEASE_INFO_KHR,
-                .acquireCount = 1,
-                .pAcquireSyncs = &doob_sc->vk_mirrored_shared_image_memory,
-                .pAcquireKeys = &win32_acquire_key,
-                .pAcquireTimeouts = &win32_acquire_timeout,
-                .releaseCount = 1,
-                .pReleaseSyncs = &doob_sc->vk_mirrored_shared_image_memory,
-                .pReleaseKeys = &win32_release_key
-            };
-            VkSubmitInfo submit_info = {
-                .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-                .pNext = &win32_keyed_mutex_acquire_release_info,
-                .waitSemaphoreCount = pPresentInfo->waitSemaphoreCount,
-                .pWaitSemaphores = pPresentInfo->pWaitSemaphores,
-                .pWaitDstStageMask = wait_dst_mask.data(), // See fix below
-                .commandBufferCount = 1,
-                .pCommandBuffers = &sync_commands,
-            };
-
-            // TEMPORARY FENCE
-            VkFence fence;
-            VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-            VkResult res;
-            DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, CreateFence, (device, &fence_info, nullptr, &fence));
-            if (res != VK_SUCCESS) {
-                return VK_ERROR_DEVICE_LOST;
-            }
-            DOOB_print("submission\n");
-            DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, QueueSubmit, (queue, 1, &submit_info, fence));
-            if (res != VK_SUCCESS) {
-                return VK_ERROR_DEVICE_LOST;
-            }
-            DOOB_print("ready to to dxgi!\n");
-            DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, WaitForFences, (device, 1, &fence, VK_TRUE, UINT64_MAX));
-            if (res != VK_SUCCESS) {
-                return VK_ERROR_DEVICE_LOST;
-            }
-            DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, DestroyFence, (device, fence, nullptr));
-
             // D3D11 Present
             DOOB_D3D11FactoryInfo dx11_factory_info = doob_sc->dxgi_factory_info;
 
@@ -1569,9 +1572,11 @@ VkResult VKAPI_CALL DOOB_QueuePresentKHR(
             };
             dx11_factory_info.device_context->RSSetViewports(1, &viewport);
             DOOB_print("synchronising dxgi!\n");
-            hres = doob_sc->shared_keyed_mutex->AcquireSync(MUTEX_KEY_D3D11, INFINITE);
-            if (hres != S_OK) {
-                return VK_ERROR_SURFACE_LOST_KHR;
+            if (ENABLE_SYNC_DX) {
+                hres = doob_sc->shared_keyed_mutex->AcquireSync(MUTEX_KEY_D3D11, INFINITE);
+                if (hres != S_OK) {
+                    return VK_ERROR_SURFACE_LOST_KHR;
+                }
             }
             dx11_factory_info.device_context->CopyResource(doob_sc->swapchain_backbuffer, doob_sc->shared_intermediate_tex);
             DOOB_print("presenting dxgi!\n");
@@ -1591,9 +1596,11 @@ VkResult VKAPI_CALL DOOB_QueuePresentKHR(
                     pPresentInfo->pResults[i] = VK_ERROR_SURFACE_LOST_KHR;
                 }
             }
-            hres = doob_sc->shared_keyed_mutex->ReleaseSync(MUTEX_KEY_VULKAN);
-            if (hres != S_OK) {
-                return VK_ERROR_SURFACE_LOST_KHR;
+            if (ENABLE_SYNC_DX) {
+                hres = doob_sc->shared_keyed_mutex->ReleaseSync(MUTEX_KEY_VULKAN);
+                if (hres != S_OK) {
+                    return VK_ERROR_SURFACE_LOST_KHR;
+                }
             }
             DOOB_print("finished!\n");
         }
