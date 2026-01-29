@@ -1444,7 +1444,12 @@ VkResult VKAPI_CALL DOOB_QueuePresentKHR(
     }
     assert(device != VK_NULL_HANDLE);
 
-    std::vector<VkPipelineStageFlags> wait_dst_mask(pPresentInfo->waitSemaphoreCount, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    // accounts for all possible swapchain writes, via storage image, framebuffer attachment or copy command
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+    VkAccessFlags waitAccess = VK_ACCESS_MEMORY_WRITE_BIT |
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    std::vector<VkPipelineStageFlags> wait_dst_mask(pPresentInfo->waitSemaphoreCount, waitStage);
     for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
         VkSwapchainKHR sc = pPresentInfo->pSwapchains[i];
         DOOB_DxgiSwapchain* doob_sc = DOOB_GetObjectIfExists(g_dxgi_swapchains, DOOB_SWAPCHAIN_HANDLE_ID, sc);
@@ -1452,6 +1457,7 @@ VkResult VKAPI_CALL DOOB_QueuePresentKHR(
         DOOB_print("swapchain %p\n", doob_sc);
         if (doob_sc) {
             uint32_t image_idx = pPresentInfo->pImageIndices[i];
+            if (image_idx >= doob_sc->sync_command_buffers.size()) return VK_ERROR_OUT_OF_DATE_KHR;
             DOOB_print("recording commands %i/%i\n", (int)image_idx, (int)doob_sc->sync_command_buffers.size());
             VkCommandBuffer sync_commands = doob_sc->sync_command_buffers[image_idx];
             {
@@ -1465,20 +1471,33 @@ VkResult VKAPI_CALL DOOB_QueuePresentKHR(
                 if (res != VK_SUCCESS) {
                     return res;
                 }
+                VkImageMemoryBarrier img_barrier = {
+                    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                    .srcAccessMask = waitAccess,
+                    .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
+                    .oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                    .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                    .image = doob_sc->vk_mirrored_shared_image,
+                    .subresourceRange = {
+                        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                        .levelCount = 1,
+                        .layerCount = 1
+                    },
+                };
                 VkMemoryBarrier barrier = {
                     .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-                    .srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
-                    .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT
+                    .srcAccessMask = waitAccess,
+                    .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT
                 };
                 DOOB_print("pipeline barrier\n");
                 DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, CmdPipelineBarrier, (
                     sync_commands,
-                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                    waitStage,
+                    VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
                     0,
                     1, &barrier,
                     0, nullptr,
-                    0, nullptr
+                    1, &img_barrier
                     ));
 
                 DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, EndCommandBuffer, (sync_commands));
@@ -1702,7 +1721,7 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
         .arrayLayers = 1,
         .samples = VK_SAMPLE_COUNT_1_BIT,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
-        .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | pCreateInfo->imageUsage,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
     };
