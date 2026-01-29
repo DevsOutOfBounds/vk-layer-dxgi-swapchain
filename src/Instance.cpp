@@ -13,6 +13,7 @@
 #define HR(hr) do { HRESULT _hr = (hr); assert(SUCCEEDED(_hr)); } while (0)
 #define MUTEX_KEY_VULKAN 0
 #define MUTEX_KEY_D3D11  1
+#define ARRAY_SIZE(a) ((sizeof(a)) / (sizeof(*a)))
 
 std::mutex global_lock;
 typedef std::lock_guard<std::mutex> scoped_lock;
@@ -28,14 +29,21 @@ struct DOOB_DxgiSwapchain {
     IDXGISwapChain1* swapchain;
     ID3D11Texture2D* swapchain_backbuffer;
     ID3D11RenderTargetView* swapchain_rtv;
-    size_t swapchain_image_count;
+    uint32_t swapchain_image_count;
+    uint32_t image_index;
 
     ID3D11Texture2D* shared_intermediate_tex;
     HANDLE shared_intermediate_handle;
     IDXGIKeyedMutex* shared_keyed_mutex;
 
+    UINT sync_interval;
+    UINT present_flags;
+
     VkImage vk_mirrored_shared_image;
     VkDeviceMemory vk_mirrored_shared_image_memory;
+
+    std::vector<VkCommandPool> sync_command_pool;
+    std::vector<VkCommandBuffer> sync_command_buffers;
 };
 //
 
@@ -99,6 +107,8 @@ std::vector<DOOB_DxgiSwapchain*> g_dxgi_swapchains = {};
 #define DOOB_INVALID_COUNTER_HANDLE (~0U)
 #define DOOB_SWAPCHAIN_HANDLE_ID (0x1020'0000)
 
+#define DOOB_COMMAND_POOL_QUEUE_FAMILY 0
+
 #define DOOB_print(...) printf(__VA_ARGS__)
 
 template <typename TNonDispatchableHandle>
@@ -145,6 +155,7 @@ static TObject* DOOB_AllocCountedHandle(std::vector<TObject*>& data_array, uint3
         data_array.push_back({});
     }
     TObject* obj = (TObject*)alloc->pfnAllocation(NULL, sizeof(TObject), 1, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+    memset(obj, 0, sizeof(TObject));
     data_array[*out_counter] = obj;
     return obj;
 }
@@ -238,61 +249,76 @@ static DoobSettings DOOB_LoadSettings() {
 
 static constexpr DXGI_FORMAT DOOB_DXGIFormat_FromVkFormat(VkFormat format) {
     switch (format) {
-        case VK_FORMAT_R8_UNORM:            return DXGI_FORMAT_R8_UNORM;
-        case VK_FORMAT_R8_SNORM:            return DXGI_FORMAT_R8_SNORM;
-        case VK_FORMAT_R8_UINT:             return DXGI_FORMAT_R8_UINT;
-        case VK_FORMAT_R8_SINT:             return DXGI_FORMAT_R8_SINT;
+    case VK_FORMAT_R8_UNORM:            return DXGI_FORMAT_R8_UNORM;
+    case VK_FORMAT_R8_SNORM:            return DXGI_FORMAT_R8_SNORM;
+    case VK_FORMAT_R8_UINT:             return DXGI_FORMAT_R8_UINT;
+    case VK_FORMAT_R8_SINT:             return DXGI_FORMAT_R8_SINT;
 
-        case VK_FORMAT_R8G8_UNORM:          return DXGI_FORMAT_R8G8_UNORM;
-        case VK_FORMAT_R8G8_SNORM:          return DXGI_FORMAT_R8G8_SNORM;
-        case VK_FORMAT_R8G8_UINT:           return DXGI_FORMAT_R8G8_UINT;
-        case VK_FORMAT_R8G8_SINT:           return DXGI_FORMAT_R8G8_SINT;
+    case VK_FORMAT_R8G8_UNORM:          return DXGI_FORMAT_R8G8_UNORM;
+    case VK_FORMAT_R8G8_SNORM:          return DXGI_FORMAT_R8G8_SNORM;
+    case VK_FORMAT_R8G8_UINT:           return DXGI_FORMAT_R8G8_UINT;
+    case VK_FORMAT_R8G8_SINT:           return DXGI_FORMAT_R8G8_SINT;
 
-        case VK_FORMAT_R8G8B8A8_UNORM:      return DXGI_FORMAT_R8G8B8A8_UNORM;
-        case VK_FORMAT_R8G8B8A8_SNORM:      return DXGI_FORMAT_R8G8B8A8_SNORM;
-        case VK_FORMAT_R8G8B8A8_UINT:       return DXGI_FORMAT_R8G8B8A8_UINT;
-        case VK_FORMAT_R8G8B8A8_SINT:       return DXGI_FORMAT_R8G8B8A8_SINT;
-        case VK_FORMAT_R8G8B8A8_SRGB:       return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    case VK_FORMAT_R8G8B8A8_UNORM:      return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case VK_FORMAT_R8G8B8A8_SNORM:      return DXGI_FORMAT_R8G8B8A8_SNORM;
+    case VK_FORMAT_R8G8B8A8_UINT:       return DXGI_FORMAT_R8G8B8A8_UINT;
+    case VK_FORMAT_R8G8B8A8_SINT:       return DXGI_FORMAT_R8G8B8A8_SINT;
+    case VK_FORMAT_R8G8B8A8_SRGB:       return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 
-        case VK_FORMAT_B8G8R8A8_UNORM:      return DXGI_FORMAT_B8G8R8A8_UNORM;
-        case VK_FORMAT_B8G8R8A8_SRGB:       return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    case VK_FORMAT_B8G8R8A8_UNORM:      return DXGI_FORMAT_B8G8R8A8_UNORM;
+    case VK_FORMAT_B8G8R8A8_SRGB:       return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
 
-        case VK_FORMAT_R16_UNORM:           return DXGI_FORMAT_R16_UNORM;
-        case VK_FORMAT_R16_SNORM:           return DXGI_FORMAT_R16_SNORM;
-        case VK_FORMAT_R16_UINT:            return DXGI_FORMAT_R16_UINT;
-        case VK_FORMAT_R16_SINT:            return DXGI_FORMAT_R16_SINT;
-        case VK_FORMAT_R16_SFLOAT:          return DXGI_FORMAT_R16_FLOAT;
+    case VK_FORMAT_R16_UNORM:           return DXGI_FORMAT_R16_UNORM;
+    case VK_FORMAT_R16_SNORM:           return DXGI_FORMAT_R16_SNORM;
+    case VK_FORMAT_R16_UINT:            return DXGI_FORMAT_R16_UINT;
+    case VK_FORMAT_R16_SINT:            return DXGI_FORMAT_R16_SINT;
+    case VK_FORMAT_R16_SFLOAT:          return DXGI_FORMAT_R16_FLOAT;
 
-        case VK_FORMAT_R16G16_UNORM:        return DXGI_FORMAT_R16G16_UNORM;
-        case VK_FORMAT_R16G16_SNORM:        return DXGI_FORMAT_R16G16_SNORM;
-        case VK_FORMAT_R16G16_UINT:         return DXGI_FORMAT_R16G16_UINT;
-        case VK_FORMAT_R16G16_SINT:         return DXGI_FORMAT_R16G16_SINT;
-        case VK_FORMAT_R16G16_SFLOAT:       return DXGI_FORMAT_R16G16_FLOAT;
+    case VK_FORMAT_R16G16_UNORM:        return DXGI_FORMAT_R16G16_UNORM;
+    case VK_FORMAT_R16G16_SNORM:        return DXGI_FORMAT_R16G16_SNORM;
+    case VK_FORMAT_R16G16_UINT:         return DXGI_FORMAT_R16G16_UINT;
+    case VK_FORMAT_R16G16_SINT:         return DXGI_FORMAT_R16G16_SINT;
+    case VK_FORMAT_R16G16_SFLOAT:       return DXGI_FORMAT_R16G16_FLOAT;
 
-        case VK_FORMAT_R16G16B16A16_UNORM:  return DXGI_FORMAT_R16G16B16A16_UNORM;
-        case VK_FORMAT_R16G16B16A16_SNORM:  return DXGI_FORMAT_R16G16B16A16_SNORM;
-        case VK_FORMAT_R16G16B16A16_UINT:   return DXGI_FORMAT_R16G16B16A16_UINT;
-        case VK_FORMAT_R16G16B16A16_SINT:   return DXGI_FORMAT_R16G16B16A16_SINT;
-        case VK_FORMAT_R16G16B16A16_SFLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+    case VK_FORMAT_R16G16B16A16_UNORM:  return DXGI_FORMAT_R16G16B16A16_UNORM;
+    case VK_FORMAT_R16G16B16A16_SNORM:  return DXGI_FORMAT_R16G16B16A16_SNORM;
+    case VK_FORMAT_R16G16B16A16_UINT:   return DXGI_FORMAT_R16G16B16A16_UINT;
+    case VK_FORMAT_R16G16B16A16_SINT:   return DXGI_FORMAT_R16G16B16A16_SINT;
+    case VK_FORMAT_R16G16B16A16_SFLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
 
-        case VK_FORMAT_R32_UINT:            return DXGI_FORMAT_R32_UINT;
-        case VK_FORMAT_R32_SINT:            return DXGI_FORMAT_R32_SINT;
-        case VK_FORMAT_R32_SFLOAT:          return DXGI_FORMAT_R32_FLOAT;
+    case VK_FORMAT_R32_UINT:            return DXGI_FORMAT_R32_UINT;
+    case VK_FORMAT_R32_SINT:            return DXGI_FORMAT_R32_SINT;
+    case VK_FORMAT_R32_SFLOAT:          return DXGI_FORMAT_R32_FLOAT;
 
-        case VK_FORMAT_R32G32_UINT:         return DXGI_FORMAT_R32G32_UINT;
-        case VK_FORMAT_R32G32_SINT:         return DXGI_FORMAT_R32G32_SINT;
-        case VK_FORMAT_R32G32_SFLOAT:       return DXGI_FORMAT_R32G32_FLOAT;
+    case VK_FORMAT_R32G32_UINT:         return DXGI_FORMAT_R32G32_UINT;
+    case VK_FORMAT_R32G32_SINT:         return DXGI_FORMAT_R32G32_SINT;
+    case VK_FORMAT_R32G32_SFLOAT:       return DXGI_FORMAT_R32G32_FLOAT;
 
-        case VK_FORMAT_R32G32B32A32_UINT:   return DXGI_FORMAT_R32G32B32A32_UINT;
-        case VK_FORMAT_R32G32B32A32_SINT:   return DXGI_FORMAT_R32G32B32A32_SINT;
-        case VK_FORMAT_R32G32B32A32_SFLOAT: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+    case VK_FORMAT_R32G32B32A32_UINT:   return DXGI_FORMAT_R32G32B32A32_UINT;
+    case VK_FORMAT_R32G32B32A32_SINT:   return DXGI_FORMAT_R32G32B32A32_SINT;
+    case VK_FORMAT_R32G32B32A32_SFLOAT: return DXGI_FORMAT_R32G32B32A32_FLOAT;
 
-        case VK_FORMAT_D16_UNORM:           return DXGI_FORMAT_D16_UNORM;
-        case VK_FORMAT_D32_SFLOAT:          return DXGI_FORMAT_D32_FLOAT;
-        case VK_FORMAT_D24_UNORM_S8_UINT:   return DXGI_FORMAT_D24_UNORM_S8_UINT;
-        case VK_FORMAT_D32_SFLOAT_S8_UINT:  return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+    case VK_FORMAT_D16_UNORM:           return DXGI_FORMAT_D16_UNORM;
+    case VK_FORMAT_D32_SFLOAT:          return DXGI_FORMAT_D32_FLOAT;
+    case VK_FORMAT_D24_UNORM_S8_UINT:   return DXGI_FORMAT_D24_UNORM_S8_UINT;
+    case VK_FORMAT_D32_SFLOAT_S8_UINT:  return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
 
-        default:                            return DXGI_FORMAT_UNKNOWN;
+    default:                            return DXGI_FORMAT_UNKNOWN;
+    }
+}
+
+DXGI_ALPHA_MODE DOOB_DXGIAlphaMode_FromVkCompositeAlpha(VkCompositeAlphaFlagBitsKHR alpha) {
+    switch (alpha) {
+    case VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR:
+        return DXGI_ALPHA_MODE_IGNORE;
+    case VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR:
+        return DXGI_ALPHA_MODE_PREMULTIPLIED;
+    case VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR:
+        return DXGI_ALPHA_MODE_STRAIGHT;
+    case VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR:
+        return DXGI_ALPHA_MODE_UNSPECIFIED;
+    default:
+        return DXGI_ALPHA_MODE_UNSPECIFIED;
     }
 }
 
@@ -929,6 +955,11 @@ VkResult VKAPI_CALL DOOB_GetPhysicalDeviceSurfacePresentModesKHR(
         return VK_SUCCESS;
     }
 }
+
+static const VkSurfaceFormatKHR SURFACE_FORMATS[] = {
+    { VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR }
+};
+
 VkResult VKAPI_CALL DOOB_GetPhysicalDeviceSurfaceFormatsKHR(
     VkPhysicalDevice                            physicalDevice,
     VkSurfaceKHR                                surface,
@@ -952,8 +983,23 @@ VkResult VKAPI_CALL DOOB_GetPhysicalDeviceSurfaceFormatsKHR(
     }
 
     // TODO: somehow query the DXGI supported formats
+    if (!pSurfaceFormatCount) {
+        return VK_INCOMPLETE;
+    }
+    if (pSurfaceFormats == NULL) {
+        *pSurfaceFormatCount = ARRAY_SIZE(SURFACE_FORMATS);
+        return VK_SUCCESS;
+    }
+    else {
+        for (uint32_t i = 0; i < *pSurfaceFormatCount; ++i) {
+            pSurfaceFormats[i] = SURFACE_FORMATS[i];
+        }
+        if (*pSurfaceFormatCount < ARRAY_SIZE(SURFACE_FORMATS)) {
+            return VK_INCOMPLETE;
+        }
+        return VK_SUCCESS;
+    }
 
-    return VK_ERROR_UNKNOWN;
 }
 
 VkResult VKAPI_CALL DOOB_GetPhysicalDeviceSurfaceSupportKHR(
@@ -977,8 +1023,12 @@ VkResult VKAPI_CALL DOOB_GetPhysicalDeviceSurfaceSupportKHR(
         DOOB_CALL_DISPATCH_TABLE(g_instance_dispatch, instance, res, GetPhysicalDeviceSurfaceSupportKHR, (physicalDevice, queueFamilyIndex, surface, pSupported));
         return res;
     }
-    // Any queue is supported, as long as we can release and acquire the queued mutex
-    *pSupported = VK_TRUE;
+
+    //// Any queue is supported, as long as we can release and acquire the queued mutex
+    //*pSupported = VK_TRUE;
+
+    // FIXME: make command pools for all families if necessary
+    *pSupported = queueFamilyIndex == DOOB_COMMAND_POOL_QUEUE_FAMILY ? VK_TRUE : VK_FALSE;
     return VK_SUCCESS;
 }
 
@@ -1174,6 +1224,7 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
 
     // fetch our own dispatch table for the functions we need, into the next layer
     VkLayerDispatchTable dispatchTable;
+    // overriding functions
     ASSIGN_DISPATCH(GetDeviceProcAddr);
     ASSIGN_DISPATCH(DestroyDevice);
     ASSIGN_DISPATCH(GetDeviceQueue);
@@ -1202,15 +1253,23 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
     ASSIGN_DISPATCH(SetSwapchainPresentTimingQueueSizeEXT);
     ASSIGN_DISPATCH(WaitForPresentKHR);
     ASSIGN_DISPATCH(WaitForPresent2KHR);
-	ASSIGN_DISPATCH(CreateImage);
-	ASSIGN_DISPATCH(GetImageMemoryRequirements2);
-	ASSIGN_DISPATCH(AllocateMemory);
-	ASSIGN_DISPATCH(BindImageMemory);
-	ASSIGN_DISPATCH(CreateFence);
-	ASSIGN_DISPATCH(DestroyFence);
-	ASSIGN_DISPATCH(QueueSubmit);
-	ASSIGN_DISPATCH(WaitForFences);
 
+    // vulkan functios we rely on!
+    ASSIGN_DISPATCH(CreateImage);
+    ASSIGN_DISPATCH(GetImageMemoryRequirements2);
+    ASSIGN_DISPATCH(AllocateMemory);
+    ASSIGN_DISPATCH(BindImageMemory);
+    ASSIGN_DISPATCH(CreateFence);
+    ASSIGN_DISPATCH(DestroyFence);
+    ASSIGN_DISPATCH(QueueSubmit);
+    ASSIGN_DISPATCH(WaitForFences);
+    ASSIGN_DISPATCH(AllocateCommandBuffers);
+    ASSIGN_DISPATCH(CreateCommandPool);
+    ASSIGN_DISPATCH(DestroyCommandPool);
+    ASSIGN_DISPATCH(ResetCommandBuffer);
+    ASSIGN_DISPATCH(BeginCommandBuffer);
+    ASSIGN_DISPATCH(EndCommandBuffer);
+    ASSIGN_DISPATCH(CmdPipelineBarrier);
 #undef ASSIGN_DISPATCH
     // store the table by key
     {
@@ -1226,9 +1285,9 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
         VkPhysicalDeviceProperties2 properties2{
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
             .pNext = &id_properties,
-        }; 
+        };
         DOOB_GetPhysicalDeviceProperties2(physicalDevice, &properties2);
-        
+
         if (id_properties.deviceLUIDValid == VK_FALSE) {
             return VK_ERROR_FEATURE_NOT_PRESENT;
         }
@@ -1238,9 +1297,9 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
 
         // Factory
         UINT factory_flags = 0;
-        #ifdef _DEBUG
+#ifdef _DEBUG
         factory_flags |= DXGI_CREATE_FACTORY_DEBUG;
-        #endif
+#endif
         HR(CreateDXGIFactory2(factory_flags, IID_PPV_ARGS(&factory_info.dxgi_factory)));
 
         // Device
@@ -1267,9 +1326,9 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
             }
 
             UINT flags = 0;
-            #ifdef _DEBUG
+#ifdef _DEBUG
             flags |= D3D11_CREATE_DEVICE_DEBUG;
-            #endif
+#endif
             D3D_FEATURE_LEVEL feature_levels[] = { D3D_FEATURE_LEVEL_11_0 };
             D3D_FEATURE_LEVEL picked_feature_level;
 
@@ -1377,7 +1436,7 @@ void VKAPI_CALL DOOB_GetDeviceQueue2(
 VkResult VKAPI_CALL DOOB_QueuePresentKHR(
     VkQueue                                     queue,
     const VkPresentInfoKHR* pPresentInfo) {
-
+    DOOB_print("presentation\n");
     VkDevice device;
     {
         scoped_lock l(global_lock);
@@ -1385,14 +1444,50 @@ VkResult VKAPI_CALL DOOB_QueuePresentKHR(
     }
     assert(device != VK_NULL_HANDLE);
 
+    std::vector<VkPipelineStageFlags> wait_dst_mask(pPresentInfo->waitSemaphoreCount, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
     for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
         VkSwapchainKHR sc = pPresentInfo->pSwapchains[i];
         DOOB_DxgiSwapchain* doob_sc = DOOB_GetObjectIfExists(g_dxgi_swapchains, DOOB_SWAPCHAIN_HANDLE_ID, sc);
 
+        DOOB_print("swapchain %p\n", doob_sc);
         if (doob_sc) {
-            // DXGI PRESENT HERE
-            // NOTE: how to deal with the pWaitSemaphores?
-            // pPresentInfo->pResults[i] = ...
+            uint32_t image_idx = pPresentInfo->pImageIndices[i];
+            DOOB_print("recording commands %i/%i\n", (int)image_idx, (int)doob_sc->sync_command_buffers.size());
+            VkCommandBuffer sync_commands = doob_sc->sync_command_buffers[image_idx];
+            {
+                // FIXME: why are validation layers crashing here????
+                VkCommandBufferBeginInfo begin_info = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+                VkResult res;
+                DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, ResetCommandBuffer, (sync_commands, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT));
+                DOOB_print("ResetCommandBuffer %i\n", res);
+                DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, BeginCommandBuffer, (sync_commands, &begin_info));
+                DOOB_print("BeginCommandBuffer %i\n", res);
+                if (res != VK_SUCCESS) {
+                    return res;
+                }
+                VkMemoryBarrier barrier = {
+                    .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                    .srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+                    .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT
+                };
+                DOOB_print("pipeline barrier\n");
+                DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, CmdPipelineBarrier, (
+                    sync_commands,
+                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                    0,
+                    1, &barrier,
+                    0, nullptr,
+                    0, nullptr
+                    ));
+
+                DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, EndCommandBuffer, (sync_commands));
+                DOOB_print("EndCommandBuffer %i\n", res);
+                if (res != VK_SUCCESS) {
+                    return res;
+                }
+            }
+            DOOB_print("submitting\n");
             uint64_t win32_acquire_key = MUTEX_KEY_VULKAN;
             uint64_t win32_release_key = MUTEX_KEY_D3D11;
             uint32_t win32_acquire_timeout = UINT32_MAX;
@@ -1406,46 +1501,82 @@ VkResult VKAPI_CALL DOOB_QueuePresentKHR(
                 .pReleaseSyncs = &doob_sc->vk_mirrored_shared_image_memory,
                 .pReleaseKeys = &win32_release_key
             };
-
             VkSubmitInfo submit_info = {
                 .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                 .pNext = &win32_keyed_mutex_acquire_release_info,
-                .commandBufferCount = 0,
-                .pCommandBuffers = nullptr
+                .waitSemaphoreCount = pPresentInfo->waitSemaphoreCount,
+                .pWaitSemaphores = pPresentInfo->pWaitSemaphores,
+                .pWaitDstStageMask = wait_dst_mask.data(), // See fix below
+                .commandBufferCount = 1,
+                .pCommandBuffers = &sync_commands,
             };
 
             // TEMPORARY FENCE
             VkFence fence;
             VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
             VkResult res;
-			DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, CreateFence, (device, &fence_info, nullptr, &fence));
-			assert(res == VK_SUCCESS);
-
+            DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, CreateFence, (device, &fence_info, nullptr, &fence));
+            if (res != VK_SUCCESS) {
+                return VK_ERROR_DEVICE_LOST;
+            }
+            DOOB_print("submission\n");
             DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, QueueSubmit, (queue, 1, &submit_info, fence));
-            assert(res == VK_SUCCESS);
+            if (res != VK_SUCCESS) {
+                return VK_ERROR_DEVICE_LOST;
+            }
+            DOOB_print("ready to to dxgi!\n");
             DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, WaitForFences, (device, 1, &fence, VK_TRUE, UINT64_MAX));
-            assert(res == VK_SUCCESS);
+            if (res != VK_SUCCESS) {
+                return VK_ERROR_DEVICE_LOST;
+            }
             DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, DestroyFence, (device, fence, nullptr));
 
             // D3D11 Present
             DOOB_D3D11FactoryInfo dx11_factory_info = doob_sc->dxgi_factory_info;
 
+            HRESULT hres = S_OK;
             DXGI_SWAP_CHAIN_DESC1 swapchain_desc;
-            HR(doob_sc->swapchain->GetDesc1(&swapchain_desc));
-			D3D11_VIEWPORT viewport = { // TODO: Query the current Vulkan viewport?
-	            .TopLeftX = 0,
-	            .TopLeftY = 0,
-	            .Width = (FLOAT)swapchain_desc.Width,
-	            .Height = (FLOAT)swapchain_desc.Height,
-	            .MinDepth = 0.0f,
-	            .MaxDepth = 1.0f
-			};
-			dx11_factory_info.device_context->RSSetViewports(1, &viewport);
-
-			HR(doob_sc->shared_keyed_mutex->AcquireSync(MUTEX_KEY_D3D11, INFINITE));
+            hres = doob_sc->swapchain->GetDesc1(&swapchain_desc);
+            if (hres != S_OK) {
+                return VK_ERROR_SURFACE_LOST_KHR;
+            }
+            D3D11_VIEWPORT viewport = { // TODO: Query the current Vulkan viewport?
+                .TopLeftX = 0,
+                .TopLeftY = 0,
+                .Width = (FLOAT)swapchain_desc.Width,
+                .Height = (FLOAT)swapchain_desc.Height,
+                .MinDepth = 0.0f,
+                .MaxDepth = 1.0f
+            };
+            dx11_factory_info.device_context->RSSetViewports(1, &viewport);
+            DOOB_print("synchronising dxgi!\n");
+            hres = doob_sc->shared_keyed_mutex->AcquireSync(MUTEX_KEY_D3D11, INFINITE);
+            if (hres != S_OK) {
+                return VK_ERROR_SURFACE_LOST_KHR;
+            }
             dx11_factory_info.device_context->CopyResource(doob_sc->swapchain_backbuffer, doob_sc->shared_intermediate_tex);
-			HR(doob_sc->swapchain->Present(1, 0));
-			HR(doob_sc->shared_keyed_mutex->ReleaseSync(MUTEX_KEY_VULKAN));
+            DOOB_print("presenting dxgi!\n");
+            hres = doob_sc->swapchain->Present(doob_sc->sync_interval, doob_sc->present_flags);
+            if (pPresentInfo->pResults != NULL) {
+                if (hres == S_OK) {
+                    pPresentInfo->pResults[i] = VK_SUCCESS;
+                }
+                else if (hres == DXGI_STATUS_OCCLUDED) {
+                    pPresentInfo->pResults[i] = VK_SUBOPTIMAL_KHR;
+                }
+                else if (hres == DXGI_ERROR_DEVICE_REMOVED || hres == DXGI_ERROR_DEVICE_RESET) {
+                    pPresentInfo->pResults[i] = VK_ERROR_DEVICE_LOST;
+                    return VK_ERROR_DEVICE_LOST;
+                }
+                else {
+                    pPresentInfo->pResults[i] = VK_ERROR_SURFACE_LOST_KHR;
+                }
+            }
+            hres = doob_sc->shared_keyed_mutex->ReleaseSync(MUTEX_KEY_VULKAN);
+            if (hres != S_OK) {
+                return VK_ERROR_SURFACE_LOST_KHR;
+            }
+            DOOB_print("finished!\n");
         }
     }
     return VK_SUCCESS;
@@ -1498,7 +1629,7 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
         .BufferCount = pCreateInfo->minImageCount,
         .Scaling = DXGI_SCALING_NONE,
         .SwapEffect = local_dxgi_info.swapEffect,
-        .AlphaMode = DXGI_ALPHA_MODE_IGNORE,
+        .AlphaMode = DOOB_DXGIAlphaMode_FromVkCompositeAlpha(pCreateInfo->compositeAlpha),
         .Flags = 0
     };
 
@@ -1513,8 +1644,10 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
         &swapchain_obj->swapchain
     ));
     swapchain_obj->swapchain_image_count = swapchain_desc.BufferCount;
+    swapchain_obj->image_index = 0;
     swapchain_obj->dxgi_factory_info = factory_info;
-
+    swapchain_obj->present_flags = 0;
+    swapchain_obj->sync_interval = pCreateInfo->presentMode == VK_PRESENT_MODE_FIFO_KHR ? 1 : 0;
     HR(swapchain_obj->swapchain->GetBuffer(0, IID_PPV_ARGS(&swapchain_obj->swapchain_backbuffer)));
     HR(factory_info.device->CreateRenderTargetView(
         swapchain_obj->swapchain_backbuffer,
@@ -1634,6 +1767,49 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
     DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, BindImageMemory, (device, swapchain_obj->vk_mirrored_shared_image, swapchain_obj->vk_mirrored_shared_image_memory, 0));
     assert(res == VK_SUCCESS);
 
+    DOOB_print("[DOOB] making commands\n");
+    // 1. Create ONE Command Pool for all buffers
+    VkCommandPoolCreateInfo sync_pool_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = DOOB_COMMAND_POOL_QUEUE_FAMILY
+    };
+    DOOB_print("[DOOB] xxx\n");
+    VkCommandPool swapchain_pool;
+    DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, CreateCommandPool, (device, &sync_pool_info, pAllocator, &swapchain_pool));
+    if (res != VK_SUCCESS) {
+        DOOB_print("[DOOB] FAIL pool, %i\n", res);
+        return res;
+    }
+    DOOB_print("[DOOB] wait\n");
+
+    new (&swapchain_obj->sync_command_buffers) std::vector<VkCommandBuffer>();
+    new (&swapchain_obj->sync_command_pool) std::vector<VkCommandPool>();
+
+    swapchain_obj->sync_command_pool.push_back(swapchain_pool);
+
+    VkCommandBufferAllocateInfo sync_cmd_alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .pNext = nullptr,
+        .commandPool = swapchain_pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = swapchain_obj->swapchain_image_count
+    };
+    DOOB_print("[DOOB] one more\n");
+
+    swapchain_obj->sync_command_buffers.resize(swapchain_obj->swapchain_image_count);
+
+    DOOB_print("[DOOB] one allocate\n");
+    DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, AllocateCommandBuffers, (device, &sync_cmd_alloc_info, swapchain_obj->sync_command_buffers.data()));
+
+    if (res != VK_SUCCESS) {
+        DOOB_print("[DOOB] FAIL commands, %i\n", res);
+        DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, DestroyCommandPool, (device, swapchain_pool, pAllocator));
+        return res;
+    }
+    DOOB_print("[DOOB] success commands\n");
+
     *pSwapchain = DOOB_MakeHandle<VkSwapchainKHR>(DOOB_SWAPCHAIN_HANDLE_ID, swapchain_handle);
 
     return VK_SUCCESS;
@@ -1669,25 +1845,28 @@ VkResult VKAPI_CALL DOOB_GetSwapchainImagesKHR(
     VkSwapchainKHR                              swapchain,
     uint32_t* pSwapchainImageCount,
     VkImage* pSwapchainImages) {
+    DOOB_print("Get images\n");
 
     // EXAMPLE HOW TO USE:
 
     DOOB_DxgiSwapchain* swapchain_obj = DOOB_GetObjectIfExists(g_dxgi_swapchains, DOOB_SWAPCHAIN_HANDLE_ID, swapchain);
     if (!swapchain_obj) {
-        // not found in our database! probably normal swapchain, call normal function
-
-        VkResult vkresult;
-        DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, vkresult, GetSwapchainImagesKHR, (device, swapchain, pSwapchainImageCount, pSwapchainImages));
-        return vkresult;
+        DOOB_print("Failed what\n");
+        return VK_ERROR_UNKNOWN;
     }
-
+    if (pSwapchainImageCount == NULL) {
+        return VK_INCOMPLETE;
+    }
     if (pSwapchainImages == nullptr) {
         *pSwapchainImageCount = (uint32_t)swapchain_obj->swapchain_image_count;
         return VK_SUCCESS;
     }
 
-    for (uint32_t i = 0; i < *pSwapchainImageCount; ++i) {
+    for (uint32_t i = 0; i < std::min(*pSwapchainImageCount, swapchain_obj->swapchain_image_count); ++i) {
         pSwapchainImages[i] = swapchain_obj->vk_mirrored_shared_image;
+    }
+    if (*pSwapchainImageCount < swapchain_obj->swapchain_image_count) {
+        return VK_INCOMPLETE;
     }
     return VK_SUCCESS;
 }
@@ -1717,19 +1896,36 @@ VkResult VKAPI_CALL DOOB_AcquireNextImageKHR(
     VkSemaphore                                 semaphore,
     VkFence                                     fence,
     uint32_t* pImageIndex) {
+    DOOB_print("Acquire image\n");
+    if (!pImageIndex) {
+        return VK_ERROR_UNKNOWN;
+    }
 
-    // TODO
+    DOOB_DxgiSwapchain* swapchain_obj = DOOB_GetObjectIfExists(g_dxgi_swapchains, DOOB_SWAPCHAIN_HANDLE_ID, swapchain);
 
-    return VK_ERROR_UNKNOWN;
+    if (!swapchain_obj) {
+        return VK_ERROR_UNKNOWN;
+    }
+    *pImageIndex = (swapchain_obj->image_index + 1) % swapchain_obj->swapchain_image_count;
+    return VK_SUCCESS;
 }
 VkResult VKAPI_CALL DOOB_AcquireNextImage2KHR(
     VkDevice                                    device,
     const VkAcquireNextImageInfoKHR* pAcquireInfo,
     uint32_t* pImageIndex) {
+    if (!pAcquireInfo) {
+        return VK_ERROR_UNKNOWN;
+    }
+    if (!pImageIndex) {
+        return VK_ERROR_UNKNOWN;
+    }
+    DOOB_DxgiSwapchain* swapchain_obj = DOOB_GetObjectIfExists(g_dxgi_swapchains, DOOB_SWAPCHAIN_HANDLE_ID, pAcquireInfo->swapchain);
 
-    // TODO
-
-    return VK_ERROR_UNKNOWN;
+    if (!swapchain_obj) {
+        return VK_ERROR_UNKNOWN;
+    }
+    *pImageIndex = (swapchain_obj->image_index + 1) % swapchain_obj->swapchain_image_count;
+    return VK_SUCCESS;
 }
 VkResult VKAPI_CALL DOOB_GetPastPresentationTimingGOOGLE(
     VkDevice                                    device,
