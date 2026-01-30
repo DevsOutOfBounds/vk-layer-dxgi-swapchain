@@ -28,9 +28,8 @@ struct DOOB_DxgiSwapchain {
 
     IDXGISwapChain1* swapchain;
     ID3D11Texture2D* swapchain_backbuffer;
-    ID3D11RenderTargetView* swapchain_rtv;
     uint32_t swapchain_image_count;
-    uint32_t image_index;
+    uint32_t next_image_index;
 
     ID3D11Texture2D* shared_intermediate_tex;
     HANDLE shared_intermediate_handle;
@@ -59,9 +58,10 @@ static DoobRequiredExt REQUIRED_INSTANCE_EXTS[] = {
 };
 
 static DoobRequiredExt REQUIRED_DEVICE_EXTS[] = {
+    { VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME, VK_API_VERSION_1_1 },
+    { VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME, VK_API_VERSION_1_1 },
     { VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME, ~0U },
     { VK_KHR_WIN32_KEYED_MUTEX_EXTENSION_NAME, ~0U },
-    { VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME, VK_API_VERSION_1_1 },
 };
 
 
@@ -77,6 +77,7 @@ struct DoobDeviceConfig {
     bool dxgi_swapchain_extension_enabled;
     bool dxgi_swapchain_feature_enabled;
     DOOB_D3D11FactoryInfo factory_info;
+    std::unordered_map<uint32_t, std::vector<VkQueue>> queues_per_family;
 };
 struct DoobInstanceConfig {
     std::unordered_set<VkPhysicalDevice> physical_devices;
@@ -109,7 +110,7 @@ std::vector<DOOB_DxgiSwapchain*> g_dxgi_swapchains = {};
 #define DOOB_INVALID_COUNTER_HANDLE (~0U)
 #define DOOB_SWAPCHAIN_HANDLE_ID (0x1020'0000)
 
-#define DOOB_COMMAND_POOL_QUEUE_FAMILY 0
+#define DOOB_PRESENT_QUEUE_FAMILY 0
 
 #define DOOB_print(...) printf(__VA_ARGS__)
 
@@ -219,7 +220,6 @@ static DoobSettings DOOB_LoadSettings() {
     VkuLayerSettingSet setting_set;
 
     VkResult res;
-
     res = vkuCreateLayerSettingSet(VK_LAYER_DOOB_DXGI_SWAPCHAIN_NAME, &create_info, nullptr, NULL, &setting_set);
     if (res != VK_SUCCESS) {
         return {};
@@ -794,9 +794,10 @@ VkResult VKAPI_CALL DOOB_GetPhysicalDevicePresentRectanglesKHR(
         return VK_INCOMPLETE;
     }
 
-    VkIcdSurfaceWin32* win32_surface = (VkIcdSurfaceWin32*)surface;
-    if (win32_surface->base.platform != VK_ICD_WSI_PLATFORM_WIN32) {
-        return VK_ERROR_UNKNOWN;
+    DoobWin32Surface win32_surface;
+    {
+        scoped_lock l(global_lock);
+        win32_surface = g_win32_surfaces[surface];
     }
     // TODO
 
@@ -826,12 +827,16 @@ VkResult VKAPI_CALL DOOB_GetPhysicalDeviceSurfaceCapabilitiesKHR(
     if (!pSurfaceCapabilities) {
         return VK_INCOMPLETE;
     }
-    VkIcdSurfaceWin32* win32_surface = (VkIcdSurfaceWin32*)surface;
-    if (win32_surface->base.platform != VK_ICD_WSI_PLATFORM_WIN32) {
-        return VK_ERROR_UNKNOWN;
+
+
+
+    DoobWin32Surface win32_surface;
+    {
+        scoped_lock l(global_lock);
+        win32_surface = g_win32_surfaces[surface];
     }
     RECT rect;
-    if (GetClientRect(win32_surface->hwnd, &rect) == FALSE) {
+    if (GetClientRect(win32_surface.hwnd, &rect) == FALSE) {
         return VK_ERROR_SURFACE_LOST_KHR;
     }
     pSurfaceCapabilities->minImageCount = 2;
@@ -873,9 +878,11 @@ VkResult VKAPI_CALL DOOB_GetPhysicalDeviceSurfaceCapabilities2KHR(
     if (!pSurfaceInfo || !pSurfaceCapabilities) {
         return VK_INCOMPLETE;
     }
-    VkIcdSurfaceWin32* win32_surface = (VkIcdSurfaceWin32*)pSurfaceInfo->surface;
-    if (win32_surface->base.platform != VK_ICD_WSI_PLATFORM_WIN32) {
-        return VK_ERROR_UNKNOWN;
+
+    DoobWin32Surface win32_surface;
+    {
+        scoped_lock l(global_lock);
+        win32_surface = g_win32_surfaces[pSurfaceInfo->surface];
     }
     return DOOB_GetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, pSurfaceInfo->surface, &pSurfaceCapabilities->surfaceCapabilities);
 }
@@ -903,9 +910,11 @@ VkResult VKAPI_CALL DOOB_GetPhysicalDeviceSurfaceCapabilities2EXT(
     if (!pSurfaceCapabilities) {
         return VK_INCOMPLETE;
     }
-    VkIcdSurfaceWin32* win32_surface = (VkIcdSurfaceWin32*)surface;
-    if (win32_surface->base.platform != VK_ICD_WSI_PLATFORM_WIN32) {
-        return VK_ERROR_UNKNOWN;
+
+    DoobWin32Surface win32_surface;
+    {
+        scoped_lock l(global_lock);
+        win32_surface = g_win32_surfaces[surface];
     }
     pSurfaceCapabilities->supportedSurfaceCounters = VK_SURFACE_COUNTER_VBLANK_BIT_EXT;
     return DOOB_GetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, (VkSurfaceCapabilitiesKHR*)&pSurfaceCapabilities);
@@ -1030,7 +1039,7 @@ VkResult VKAPI_CALL DOOB_GetPhysicalDeviceSurfaceSupportKHR(
     //*pSupported = VK_TRUE;
 
     // FIXME: make command pools for all families if necessary
-    *pSupported = queueFamilyIndex == DOOB_COMMAND_POOL_QUEUE_FAMILY ? VK_TRUE : VK_FALSE;
+    *pSupported = queueFamilyIndex == DOOB_PRESENT_QUEUE_FAMILY ? VK_TRUE : VK_FALSE;
     return VK_SUCCESS;
 }
 
@@ -1233,6 +1242,8 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
     ASSIGN_DISPATCH(GetDeviceQueue2);
     ASSIGN_DISPATCH(GetDeviceGroupPresentCapabilitiesKHR);
     ASSIGN_DISPATCH(QueuePresentKHR);
+    ASSIGN_DISPATCH(QueueSubmit);
+    ASSIGN_DISPATCH(QueueSubmit2KHR);
     ASSIGN_DISPATCH(CreateSwapchainKHR);
     ASSIGN_DISPATCH(CreateSharedSwapchainsKHR);
     ASSIGN_DISPATCH(DestroySwapchainKHR);
@@ -1256,7 +1267,7 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
     ASSIGN_DISPATCH(WaitForPresentKHR);
     ASSIGN_DISPATCH(WaitForPresent2KHR);
 
-    // vulkan functios we rely on!
+    // vulkan functions we rely on!
     ASSIGN_DISPATCH(CreateImage);
     ASSIGN_DISPATCH(GetImageMemoryRequirements2KHR);
     ASSIGN_DISPATCH(AllocateMemory);
@@ -1408,10 +1419,17 @@ void VKAPI_CALL DOOB_GetDeviceQueue(
     uint32_t                                    queueIndex,
     VkQueue* pQueue) {
 
-    g_device_dispatch[device].GetDeviceQueue(device, queueFamilyIndex, queueIndex, pQueue);
     if (pQueue) {
         scoped_lock l(global_lock);
+        g_device_dispatch[device].GetDeviceQueue(device, queueFamilyIndex, queueIndex, pQueue);
         g_queue_ownership[*pQueue] = device;
+        auto& vec = g_device_config[device].queues_per_family[queueFamilyIndex];
+        if (queueIndex >= (uint32_t)vec.size()) {
+            vec.insert(vec.begin() + queueIndex, *pQueue);
+        }
+        else {
+            vec[queueIndex] = *pQueue;
+        }
     }
 }
 
@@ -1428,12 +1446,36 @@ void VKAPI_CALL DOOB_GetDeviceQueue2(
     const VkDeviceQueueInfo2* pQueueInfo,
     VkQueue* pQueue) {
 
-    g_device_dispatch[device].GetDeviceQueue2(device, pQueueInfo, pQueue);
-    {
-        scoped_lock l(global_lock);
-        g_queue_ownership[*pQueue] = device;
-    }
+        {
+            scoped_lock l(global_lock);
+            g_device_dispatch[device].GetDeviceQueue2(device, pQueueInfo, pQueue);
+            g_queue_ownership[*pQueue] = device;
+            auto& vec = g_device_config[device].queues_per_family[pQueueInfo->queueFamilyIndex];
+            if (pQueueInfo->queueIndex >= (uint32_t)vec.size()) {
+                vec.insert(vec.begin() + pQueueInfo->queueIndex, *pQueue);
+            }
+            else {
+                vec[pQueueInfo->queueIndex] = *pQueue;
+            }
+        }
 }
+//
+//VkResult VKAPI_CALL DOOB_QueueSubmit(
+//    VkQueue                                     queue,
+//    uint32_t                                    submitCount,
+//    const VkSubmitInfo* pSubmits,
+//    VkFence                                     fence) {
+//
+//}
+//
+//VkResult VKAPI_CALL DOOB_QueueSubmit2KHR(
+//    VkQueue                                     queue,
+//    uint32_t                                    submitCount,
+//    const VkSubmitInfo2* pSubmits,
+//    VkFence                                     fence) {
+//   
+//}
+
 
 VkResult VKAPI_CALL DOOB_QueuePresentKHR(
     VkQueue                                     queue,
@@ -1459,7 +1501,7 @@ VkResult VKAPI_CALL DOOB_QueuePresentKHR(
         DOOB_print("swapchain %p\n", doob_sc);
         if (doob_sc) {
             static constexpr bool ENABLE_SYNC_VK = true; // debugging on intel
-            static constexpr bool ENABLE_SYNC_DX = true; 
+            static constexpr bool ENABLE_SYNC_DX = true;
             if (ENABLE_SYNC_VK) {
                 uint32_t image_idx = pPresentInfo->pImageIndices[i];
                 if (image_idx >= doob_sc->sync_command_buffers.size()) return VK_ERROR_OUT_OF_DATE_KHR;
@@ -1512,15 +1554,10 @@ VkResult VKAPI_CALL DOOB_QueuePresentKHR(
                     }
                 }
                 DOOB_print("submitting\n");
-                uint64_t win32_acquire_key = MUTEX_KEY_VULKAN;
-                uint64_t win32_release_key = MUTEX_KEY_D3D11;
-                uint32_t win32_acquire_timeout = UINT32_MAX;
+                // now we can finally release it, and give it to DX11
+                const uint64_t win32_release_key = MUTEX_KEY_D3D11;
                 VkWin32KeyedMutexAcquireReleaseInfoKHR win32_keyed_mutex_acquire_release_info = {
                     .sType = VK_STRUCTURE_TYPE_WIN32_KEYED_MUTEX_ACQUIRE_RELEASE_INFO_KHR,
-                    .acquireCount = 1,
-                    .pAcquireSyncs = &doob_sc->vk_mirrored_shared_image_memory,
-                    .pAcquireKeys = &win32_acquire_key,
-                    .pAcquireTimeouts = &win32_acquire_timeout,
                     .releaseCount = 1,
                     .pReleaseSyncs = &doob_sc->vk_mirrored_shared_image_memory,
                     .pReleaseKeys = &win32_release_key
@@ -1564,15 +1601,6 @@ VkResult VKAPI_CALL DOOB_QueuePresentKHR(
             if (hres != S_OK) {
                 return VK_ERROR_SURFACE_LOST_KHR;
             }
-            D3D11_VIEWPORT viewport = { // TODO: Query the current Vulkan viewport?
-                .TopLeftX = 0,
-                .TopLeftY = 0,
-                .Width = (FLOAT)swapchain_desc.Width,
-                .Height = (FLOAT)swapchain_desc.Height,
-                .MinDepth = 0.0f,
-                .MaxDepth = 1.0f
-            };
-            dx11_factory_info.device_context->RSSetViewports(1, &viewport);
             DOOB_print("synchronising dxgi!\n");
             if (ENABLE_SYNC_DX) {
                 hres = doob_sc->shared_keyed_mutex->AcquireSync(MUTEX_KEY_D3D11, INFINITE);
@@ -1660,8 +1688,24 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
         .AlphaMode = DOOB_DXGIAlphaMode_FromVkCompositeAlpha(pCreateInfo->compositeAlpha),
         .Flags = 0
     };
-
     DOOB_D3D11FactoryInfo factory_info = device_config.factory_info;
+    swapchain_obj->swapchain_image_count = swapchain_desc.BufferCount;
+    swapchain_obj->next_image_index = 0;
+    swapchain_obj->dxgi_factory_info = factory_info;
+    swapchain_obj->present_flags = 0;
+    switch (pCreateInfo->presentMode) {
+    case VK_PRESENT_MODE_FIFO_KHR:
+        swapchain_obj->sync_interval = 1;
+        break;
+    case VK_PRESENT_MODE_IMMEDIATE_KHR:
+        swapchain_obj->sync_interval = 0;
+        swapchain_desc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+        swapchain_obj->present_flags |= DXGI_PRESENT_ALLOW_TEARING;
+        break;
+    case VK_PRESENT_MODE_MAILBOX_KHR:
+        swapchain_obj->sync_interval = 0;
+        break;
+    }
 
     HR(device_config.factory_info.dxgi_factory->CreateSwapChainForHwnd(
         factory_info.device,
@@ -1671,17 +1715,7 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
         nullptr,
         &swapchain_obj->swapchain
     ));
-    swapchain_obj->swapchain_image_count = swapchain_desc.BufferCount;
-    swapchain_obj->image_index = 0;
-    swapchain_obj->dxgi_factory_info = factory_info;
-    swapchain_obj->present_flags = 0;
-    swapchain_obj->sync_interval = pCreateInfo->presentMode == VK_PRESENT_MODE_FIFO_KHR ? 1 : 0;
     HR(swapchain_obj->swapchain->GetBuffer(0, IID_PPV_ARGS(&swapchain_obj->swapchain_backbuffer)));
-    HR(factory_info.device->CreateRenderTargetView(
-        swapchain_obj->swapchain_backbuffer,
-        nullptr,
-        &swapchain_obj->swapchain_rtv
-    ));
 
     // Create shared texture handle
     // TODO: Not sure if this should be created elsewhere, but for now it will have to do
@@ -1801,7 +1835,7 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         .pNext = nullptr,
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-        .queueFamilyIndex = DOOB_COMMAND_POOL_QUEUE_FAMILY
+        .queueFamilyIndex = DOOB_PRESENT_QUEUE_FAMILY
     };
     DOOB_print("[DOOB] xxx\n");
     VkCommandPool swapchain_pool;
@@ -1840,6 +1874,11 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
 
     *pSwapchain = DOOB_MakeHandle<VkSwapchainKHR>(DOOB_SWAPCHAIN_HANDLE_ID, swapchain_handle);
 
+    swapchain_obj->shared_keyed_mutex->AcquireSync(MUTEX_KEY_VULKAN, INFINITE);
+    swapchain_obj->shared_keyed_mutex->ReleaseSync(MUTEX_KEY_D3D11);
+
+    swapchain_obj->shared_keyed_mutex->AcquireSync(MUTEX_KEY_D3D11, INFINITE);
+    swapchain_obj->shared_keyed_mutex->ReleaseSync(MUTEX_KEY_VULKAN);
     return VK_SUCCESS;
 }
 
@@ -1922,7 +1961,7 @@ VkResult VKAPI_CALL DOOB_AcquireNextImageKHR(
     VkSwapchainKHR                              swapchain,
     uint64_t                                    timeout,
     VkSemaphore                                 semaphore,
-    VkFence                                     fence,
+    VkFence                                     fence_ /*TODO*/,
     uint32_t* pImageIndex) {
     DOOB_print("Acquire image\n");
     if (!pImageIndex) {
@@ -1930,30 +1969,120 @@ VkResult VKAPI_CALL DOOB_AcquireNextImageKHR(
     }
 
     DOOB_DxgiSwapchain* swapchain_obj = DOOB_GetObjectIfExists(g_dxgi_swapchains, DOOB_SWAPCHAIN_HANDLE_ID, swapchain);
-
     if (!swapchain_obj) {
         return VK_ERROR_UNKNOWN;
     }
-    *pImageIndex = (swapchain_obj->image_index + 1) % swapchain_obj->swapchain_image_count;
+    VkQueue queue;
+    {
+        std::scoped_lock l(global_lock);
+        auto& vec = g_device_config[device].queues_per_family[DOOB_PRESENT_QUEUE_FAMILY];
+        auto it = std::find_if(vec.begin(), vec.end(), [](VkQueue q) {return q != VK_NULL_HANDLE; });
+        if (it == vec.end()) {
+            return VK_ERROR_UNKNOWN;
+        }
+        queue = *it;
+    }    // accounts for all possible swapchain writes, via storage image, framebuffer attachment or copy command
+    // FIXME FIXME FIXME FIXME
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    VkAccessFlags waitAccess = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT;
+    uint32_t image_idx = swapchain_obj->next_image_index;
+    if (image_idx >= swapchain_obj->sync_command_buffers.size()) return VK_ERROR_OUT_OF_DATE_KHR;
+    VkCommandBuffer sync_commands = swapchain_obj->sync_command_buffers[image_idx];
+    {
+        // FIXME: why are validation layers crashing here????
+        VkCommandBufferBeginInfo begin_info = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+        VkResult res;
+        DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, ResetCommandBuffer, (sync_commands, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT));
+        DOOB_print("ResetCommandBuffer %i\n", res);
+        DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, BeginCommandBuffer, (sync_commands, &begin_info));
+        DOOB_print("BeginCommandBuffer %i\n", res);
+        if (res != VK_SUCCESS) {
+            return res;
+        }
+
+        VkImageMemoryBarrier img_barrier = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = waitAccess,
+            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .image = swapchain_obj->vk_mirrored_shared_image,
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .levelCount = 1,
+                .layerCount = 1
+            },
+        };
+        
+        VkMemoryBarrier barrier = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .srcAccessMask = waitAccess,
+            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT
+        };
+        DOOB_print("pipeline barrier\n");
+        DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, CmdPipelineBarrier, (
+            sync_commands,
+            waitStage,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            0,
+            1, &barrier,
+            0, nullptr,
+            1, &img_barrier
+            ));
+
+        DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, EndCommandBuffer, (sync_commands));
+        DOOB_print("EndCommandBuffer %i\n", res);
+        if (res != VK_SUCCESS) {
+            return res;
+        }
+    }
+    DOOB_print("submitting\n");
+    // acquire mutex, so we can render to it
+    const uint64_t win32_acquire_key = MUTEX_KEY_VULKAN;
+    const uint32_t acquireTimeout = timeout == UINT64_MAX ? INFINITE : (uint32_t)std::min(timeout, (uint64_t)(INFINITE)-1);
+    VkWin32KeyedMutexAcquireReleaseInfoKHR win32_keyed_mutex_acquire_release_info = {
+        .sType = VK_STRUCTURE_TYPE_WIN32_KEYED_MUTEX_ACQUIRE_RELEASE_INFO_KHR,
+        .acquireCount = 1,
+        .pAcquireSyncs = &swapchain_obj->vk_mirrored_shared_image_memory,
+        .pAcquireKeys = &win32_acquire_key,
+        .pAcquireTimeouts = &acquireTimeout,
+    };
+    VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .pNext = &win32_keyed_mutex_acquire_release_info,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &sync_commands,
+        .signalSemaphoreCount = semaphore == VK_NULL_HANDLE ? 0U : 1U,
+        .pSignalSemaphores = &semaphore,
+    };
+
+    // TEMPORARY FENCE
+    VkFence fence = VK_NULL_HANDLE;
+    VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VkResult res;
+    DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, CreateFence, (device, &fence_info, nullptr, &fence));
+    if (res != VK_SUCCESS) {
+        return VK_ERROR_DEVICE_LOST;
+    }
+    DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, QueueSubmit, (queue, 1, &submit_info, fence));
+    if (res != VK_SUCCESS) {
+        return VK_ERROR_DEVICE_LOST;
+    }
+    DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, WaitForFences, (device, 1, &fence, VK_TRUE, timeout));
+    if (res != VK_SUCCESS) {
+        return VK_ERROR_DEVICE_LOST;
+    }
+    DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, DestroyFence, (device, fence, nullptr));
+
+    *pImageIndex = image_idx;
+    swapchain_obj->next_image_index = (swapchain_obj->next_image_index + 1) % swapchain_obj->swapchain_image_count;
     return VK_SUCCESS;
 }
 VkResult VKAPI_CALL DOOB_AcquireNextImage2KHR(
     VkDevice                                    device,
     const VkAcquireNextImageInfoKHR* pAcquireInfo,
     uint32_t* pImageIndex) {
-    if (!pAcquireInfo) {
-        return VK_ERROR_UNKNOWN;
-    }
-    if (!pImageIndex) {
-        return VK_ERROR_UNKNOWN;
-    }
-    DOOB_DxgiSwapchain* swapchain_obj = DOOB_GetObjectIfExists(g_dxgi_swapchains, DOOB_SWAPCHAIN_HANDLE_ID, pAcquireInfo->swapchain);
-
-    if (!swapchain_obj) {
-        return VK_ERROR_UNKNOWN;
-    }
-    *pImageIndex = (swapchain_obj->image_index + 1) % swapchain_obj->swapchain_image_count;
-    return VK_SUCCESS;
+    return DOOB_AcquireNextImageKHR(device, pAcquireInfo->swapchain, pAcquireInfo->timeout, pAcquireInfo->semaphore, pAcquireInfo->fence, pImageIndex);
 }
 VkResult VKAPI_CALL DOOB_GetPastPresentationTimingGOOGLE(
     VkDevice                                    device,
@@ -2223,6 +2352,8 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL DOOB_GetDeviceProcAddr(VkDevice de
         DOOB_GETPROCADDR(GetDeviceGroupPresentCapabilitiesKHR);
         DOOB_GETPROCADDR(GetPhysicalDevicePresentRectanglesKHR);
         DOOB_GETPROCADDR(QueuePresentKHR);
+        // DOOB_GETPROCADDR(QueueSubmit);
+        // DOOB_GETPROCADDR(QueueSubmit2);
         DOOB_GETPROCADDR(CreateSwapchainKHR);
         DOOB_GETPROCADDR(CreateSharedSwapchainsKHR);
         DOOB_GETPROCADDR(DestroySwapchainKHR);
