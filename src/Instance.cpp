@@ -44,6 +44,8 @@ struct DOOB_DxgiSwapchain {
 
 	VkImage vk_mirrored_shared_image;
 	VkDeviceMemory vk_mirrored_shared_image_memory;
+	BOOL hasAllocator;
+	VkAllocationCallbacks allocator;
 };
 //
 
@@ -158,7 +160,7 @@ static TObject* DOOB_GetObjectIfExists(std::vector<TObject*>& data_array, uint32
 }
 
 template <typename TObject>
-static TObject* DOOB_AllocCountedHandle(std::vector<TObject*>& data_array, uint32_t* out_counter, const VkAllocationCallbacks* alloc) {
+static TObject* DOOB_AllocCountedHandle(std::vector<TObject*>& data_array, uint32_t* out_counter, const VkAllocationCallbacks& alloc) {
 	scoped_lock l(global_lock);
 	*out_counter = (uint32_t)data_array.size();
 	for (size_t i = 0; i < data_array.size(); ++i) {
@@ -170,7 +172,7 @@ static TObject* DOOB_AllocCountedHandle(std::vector<TObject*>& data_array, uint3
 	if (*out_counter >= data_array.size()) {
 		data_array.push_back({});
 	}
-	TObject* obj = (TObject*)alloc->pfnAllocation(NULL, sizeof(TObject), 1, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+	TObject* obj = (TObject*)alloc.pfnAllocation(NULL, sizeof(TObject), 1, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
 	memset(obj, 0, sizeof(TObject));
 	data_array[*out_counter] = obj;
 	return obj;
@@ -260,6 +262,18 @@ static DoobSettings DOOB_LoadSettings() {
 	vkuDestroyLayerSettingSet(setting_set, nullptr);
 
 	return s;
+}
+
+static bool IsDxgiInteropEnabled(const VkPhysicalDeviceProperties& properties) {
+	// Disable for intel HD/UHD graphics, as the driver implementations are BROKEN
+	if (properties.vendorID == 0x8086) {
+		if (strstr(properties.deviceName, "HD Graphics") != nullptr ||
+			strstr(properties.deviceName, "UHD Graphics") != nullptr) {
+			return false;
+		}
+	}
+
+	return true; // Assuming it defaults to true for other GPUs
 }
 
 static constexpr DXGI_FORMAT DOOB_DXGIFormat_FromVkFormat(VkFormat format) {
@@ -577,21 +591,13 @@ void VKAPI_CALL DOOB_GetPhysicalDeviceProperties2KHR(
 	}
 
 	if (supports_dxgi_doob) {
+
 		VkPhysicalDeviceDxgiPropertiesDOOB* dxgi_device_properties = (VkPhysicalDeviceDxgiPropertiesDOOB*)pProperties->pNext;
 		while (dxgi_device_properties && (dxgi_device_properties->sType != VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DXGI_PROPERTIES_DOOB)) {
 			dxgi_device_properties = (VkPhysicalDeviceDxgiPropertiesDOOB*)dxgi_device_properties->pNext;
 		}
 		if (dxgi_device_properties) {
 			// TODO: do we need this?
-
-			//VkPhysicalDeviceIDProperties id_properties{
-			//    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
-			//};
-			//VkPhysicalDeviceProperties2 properties2{
-			//    .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-			//    .pNext = &id_properties,
-			//};
-			//DOOB_CALL_VOID_DISPATCH_TABLE(g_instance_dispatch, instance, GetPhysicalDeviceProperties2KHR, (physicalDevice, &properties2));
 		}
 	}
 	DOOB_CALL_VOID_DISPATCH_TABLE(g_instance_dispatch, instance, GetPhysicalDeviceProperties2KHR, (physicalDevice, pProperties));
@@ -628,7 +634,7 @@ void VKAPI_CALL DOOB_GetPhysicalDeviceFeatures2KHR(
 				.pNext = &id_properties,
 			};
 			DOOB_CALL_VOID_DISPATCH_TABLE(g_instance_dispatch, instance, GetPhysicalDeviceProperties2KHR, (physicalDevice, &properties2));
-			if (id_properties.deviceLUIDValid == VK_TRUE || properties2.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
+			if ((id_properties.deviceLUIDValid == VK_TRUE || properties2.properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) && IsDxgiInteropEnabled(properties2.properties)) {
 				// maybe check with DXGI if the device exists
 				// However if CPU device, then just default to WARP
 				dxgi_device_features->dxgiSwapchain = VK_TRUE;
@@ -1288,6 +1294,8 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
 	}
 	ASSIGN_DISPATCH(AllocateMemory);
 	ASSIGN_DISPATCH(BindImageMemory);
+	ASSIGN_DISPATCH(DestroyImage);
+	ASSIGN_DISPATCH(FreeMemory);
 	ASSIGN_DISPATCH(CreateFence);
 	ASSIGN_DISPATCH(DestroyFence);
 	ASSIGN_DISPATCH(WaitForFences);
@@ -1378,6 +1386,7 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
 		if (!has_found_adapter) {
 			return VK_ERROR_INITIALIZATION_FAILED;
 		}
+		DOOB_print("[DOOB] Your swapchain is out of bounds\n");
 	}
 	{
 		scoped_lock l(global_lock);
@@ -1471,7 +1480,6 @@ void VKAPI_CALL DOOB_GetDeviceQueue2(
 VkResult VKAPI_CALL DOOB_QueuePresentKHR(
 	VkQueue                                     queue,
 	const VkPresentInfoKHR* pPresentInfo) {
-	DOOB_print("presentation\n");
 	VkDevice device;
 	{
 		scoped_lock l(global_lock);
@@ -1487,14 +1495,12 @@ VkResult VKAPI_CALL DOOB_QueuePresentKHR(
 		VkSwapchainKHR sc = pPresentInfo->pSwapchains[i];
 		DOOB_DxgiSwapchain* doob_sc = DOOB_GetObjectIfExists(g_dxgi_swapchains, DOOB_SWAPCHAIN_HANDLE_ID, sc);
 
-		DOOB_print("swapchain %p\n", doob_sc);
 		if (doob_sc) {
 			static constexpr bool ENABLE_SYNC_VK = true; // debugging on intel
 			static constexpr bool ENABLE_SYNC_DX = true;
 			if (ENABLE_SYNC_VK) {
 				//uint32_t image_idx = pPresentInfo->pImageIndices[i];
 
-				DOOB_print("submitting\n");
 				// now we can finally release it, and give it to DX11
 				const uint64_t win32_release_key = MUTEX_KEY_D3D11;
 				VkWin32KeyedMutexAcquireReleaseInfoKHR win32_keyed_mutex_acquire_release_info = {
@@ -1517,21 +1523,20 @@ VkResult VKAPI_CALL DOOB_QueuePresentKHR(
 				VkFence fence;
 				VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
 				VkResult res;
-				DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, CreateFence, (device, &fence_info, nullptr, &fence));
+				const VkAllocationCallbacks* pAllocator = doob_sc->hasAllocator ? &doob_sc->allocator : nullptr;
+				DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, CreateFence, (device, &fence_info, pAllocator, &fence));
 				if (res != VK_SUCCESS) {
 					return VK_ERROR_DEVICE_LOST;
 				}
-				DOOB_print("submission\n");
 				DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, QueueSubmit, (queue, 1, &submit_info, fence));
 				if (res != VK_SUCCESS) {
 					return VK_ERROR_DEVICE_LOST;
 				}
-				DOOB_print("ready to to dxgi!\n");
 				DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, WaitForFences, (device, 1, &fence, VK_TRUE, UINT64_MAX));
 				if (res != VK_SUCCESS) {
 					return VK_ERROR_DEVICE_LOST;
 				}
-				DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, DestroyFence, (device, fence, nullptr));
+				DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, DestroyFence, (device, fence, pAllocator));
 			}
 			// D3D11 Present
 			DOOB_D3D11FactoryInfo dx11_factory_info = doob_sc->dxgi_factory_info;
@@ -1542,7 +1547,6 @@ VkResult VKAPI_CALL DOOB_QueuePresentKHR(
 			if (hres != S_OK) {
 				return VK_ERROR_SURFACE_LOST_KHR;
 			}
-			DOOB_print("synchronising dxgi!\n");
 			if (ENABLE_SYNC_DX) {
 				hres = doob_sc->shared_keyed_mutex->AcquireSync(MUTEX_KEY_D3D11, INFINITE);
 				if (hres != S_OK) {
@@ -1550,7 +1554,6 @@ VkResult VKAPI_CALL DOOB_QueuePresentKHR(
 				}
 			}
 			dx11_factory_info.device_context->CopyResource(doob_sc->swapchain_backbuffer, doob_sc->shared_intermediate_tex);
-			DOOB_print("presenting dxgi!\n");
 			hres = doob_sc->swapchain->Present(doob_sc->sync_interval, doob_sc->present_flags);
 			if (pPresentInfo->pResults != NULL) {
 				if (hres == S_OK) {
@@ -1573,7 +1576,6 @@ VkResult VKAPI_CALL DOOB_QueuePresentKHR(
 					return VK_ERROR_SURFACE_LOST_KHR;
 				}
 			}
-			DOOB_print("finished!\n");
 		}
 	}
 	return VK_SUCCESS;
@@ -1584,8 +1586,10 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
 	const VkSwapchainCreateInfoKHR* pCreateInfo,
 	const VkAllocationCallbacks* pAllocator,
 	VkSwapchainKHR* pSwapchain) {
-
-	DOOB_print("[DOOB] Your swapchain is out of bounds\n");
+	if (!pSwapchain) {
+		return VK_INCOMPLETE;
+	}
+	*pSwapchain = VK_NULL_HANDLE;
 
 	VkDxgiSwapchainCreateInfoDOOB local_dxgi_info = {
 		.sType = VK_STRUCTURE_TYPE_DXGI_SWAPCHAIN_CREATE_INFO_DOOB,
@@ -1601,10 +1605,8 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
 		local_dxgi_info = *dxgi_info;
 	}
 
-	VkAllocationCallbacks alloc = DOOB_GetFilledAllocationCallbacks(pAllocator);
-
 	uint32_t swapchain_handle;
-	DOOB_DxgiSwapchain* swapchain_obj = DOOB_AllocCountedHandle(g_dxgi_swapchains, &swapchain_handle, &alloc);
+	DOOB_DxgiSwapchain* swapchain_obj = DOOB_AllocCountedHandle(g_dxgi_swapchains, &swapchain_handle, DOOB_GetFilledAllocationCallbacks(pAllocator));
 	if (!swapchain_obj) {
 		return VK_ERROR_OUT_OF_HOST_MEMORY;
 	}
@@ -1647,15 +1649,41 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
 		swapchain_obj->sync_interval = 0;
 		break;
 	}
+	swapchain_obj->hasAllocator = pAllocator != nullptr;
+	if (swapchain_obj->hasAllocator) {
+		swapchain_obj->allocator = *pAllocator;
+	}
 
-	HR(device_config.factory_info.dxgi_factory->CreateSwapChainForHwnd(
-		factory_info.device,
-		win32_surface.hwnd,
-		&swapchain_desc,
-		nullptr,
-		nullptr,
-		&swapchain_obj->swapchain
-	));
+	if (pCreateInfo->oldSwapchain == VK_NULL_HANDLE) {
+		// If no old swapchain was passed, assume that the window is free. If it isnt, then return a native window in use error
+		device_config.factory_info.device_context->Flush();
+		if (FAILED(device_config.factory_info.dxgi_factory->CreateSwapChainForHwnd(
+			factory_info.device,
+			win32_surface.hwnd,
+			&swapchain_desc,
+			nullptr,
+			nullptr,
+			&swapchain_obj->swapchain
+		))) {
+			return VK_ERROR_NATIVE_WINDOW_IN_USE_KHR;
+		}
+	}
+	else {
+		// try to take ownership of old swapchain, DXGI allows simple resize
+		DOOB_DxgiSwapchain* old_swapchain_obj = DOOB_GetObjectIfExists(g_dxgi_swapchains, DOOB_SWAPCHAIN_HANDLE_ID, pCreateInfo->oldSwapchain);
+		if (!old_swapchain_obj) {
+			return VK_ERROR_INITIALIZATION_FAILED;
+		}
+		old_swapchain_obj->swapchain_backbuffer->Release();
+		device_config.factory_info.device_context->Flush();
+		if (FAILED(old_swapchain_obj->swapchain->ResizeBuffers(swapchain_desc.BufferCount, swapchain_desc.Width,
+			swapchain_desc.Height, swapchain_desc.Format, swapchain_desc.Flags))) {
+			return VK_ERROR_SURFACE_LOST_KHR;
+		}
+		swapchain_obj->swapchain = old_swapchain_obj->swapchain;
+		old_swapchain_obj->swapchain_backbuffer = nullptr;
+		old_swapchain_obj->swapchain = nullptr;
+	}
 	HR(swapchain_obj->swapchain->GetBuffer(0, IID_PPV_ARGS(&swapchain_obj->swapchain_backbuffer)));
 
 	// Create shared texture handle
@@ -1686,6 +1714,8 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
 		nullptr,
 		&swapchain_obj->shared_intermediate_handle
 	));
+	dxgi_resource->Release();
+
 	HR(swapchain_obj->shared_intermediate_tex->QueryInterface(IID_PPV_ARGS(&swapchain_obj->shared_keyed_mutex)));
 
 	// TODO: We should probably move this to GetSwapchainImagesKHR
@@ -1711,7 +1741,7 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
 	};
 
 	VkResult res;
-	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, CreateImage, (device, &image_info, nullptr, &swapchain_obj->vk_mirrored_shared_image));
+	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, CreateImage, (device, &image_info, pAllocator, &swapchain_obj->vk_mirrored_shared_image));
 	assert(res == VK_SUCCESS);
 
 	VkMemoryPropertyFlags mem_flags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
@@ -1765,12 +1795,10 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
 		.pNext = &import_win32_handle_info,
 		.memoryTypeIndex = mem_type_idx
 	};
-	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, AllocateMemory, (device, &mem_alloc_info, nullptr, &swapchain_obj->vk_mirrored_shared_image_memory));
+	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, AllocateMemory, (device, &mem_alloc_info, pAllocator, &swapchain_obj->vk_mirrored_shared_image_memory));
 	assert(res == VK_SUCCESS);
 	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, BindImageMemory, (device, swapchain_obj->vk_mirrored_shared_image, swapchain_obj->vk_mirrored_shared_image_memory, 0));
 	assert(res == VK_SUCCESS);
-
-	DOOB_print("[DOOB] wait\n");
 
 	*pSwapchain = DOOB_MakeHandle<VkSwapchainKHR>(DOOB_SWAPCHAIN_HANDLE_ID, swapchain_handle);
 
@@ -1801,24 +1829,48 @@ void VKAPI_CALL DOOB_DestroySwapchainKHR(
 
 	VkAllocationCallbacks alloc = DOOB_GetFilledAllocationCallbacks(pAllocator);
 
-	uint32_t swapchain_handle = DOOB_GetCounterAndVerify(DOOB_SWAPCHAIN_HANDLE_ID, swapchain);
-	if (swapchain_handle == DOOB_INVALID_COUNTER_HANDLE) {
+	DOOB_DxgiSwapchain* swapchain_obj = DOOB_GetObjectIfExists(g_dxgi_swapchains, DOOB_SWAPCHAIN_HANDLE_ID, swapchain);
+	if (swapchain_obj == nullptr) {
 		return;
 	}
+
+	if (swapchain_obj->swapchain_backbuffer != nullptr) {
+		swapchain_obj->swapchain_backbuffer->Release();
+	}
+	if (swapchain_obj->shared_intermediate_tex != nullptr) {
+		swapchain_obj->shared_intermediate_tex->Release();
+	}
+	if (swapchain_obj->shared_intermediate_handle != NULL && swapchain_obj->shared_intermediate_handle != INVALID_HANDLE_VALUE) {
+		CloseHandle(swapchain_obj->shared_intermediate_handle);
+	}
+	if (swapchain_obj->swapchain != nullptr) {
+		swapchain_obj->swapchain->Release();
+	}
+	if (swapchain_obj->shared_keyed_mutex != nullptr) {
+		swapchain_obj->shared_keyed_mutex->Release();
+	}
+
+	if (swapchain_obj->vk_mirrored_shared_image != VK_NULL_HANDLE) {
+		DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, DestroyImage, (device, swapchain_obj->vk_mirrored_shared_image, pAllocator));
+	}
+	if (swapchain_obj->vk_mirrored_shared_image_memory != VK_NULL_HANDLE) {
+		DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, FreeMemory, (device, swapchain_obj->vk_mirrored_shared_image_memory, pAllocator));
+	}
+
+	uint32_t swapchain_handle = DOOB_GetCounterAndVerify(DOOB_SWAPCHAIN_HANDLE_ID, swapchain);
 	DOOB_ReleaseCountedHandle(g_dxgi_swapchains, swapchain_handle, &alloc);
 }
+
 VkResult VKAPI_CALL DOOB_GetSwapchainImagesKHR(
 	VkDevice                                    device,
 	VkSwapchainKHR                              swapchain,
 	uint32_t* pSwapchainImageCount,
 	VkImage* pSwapchainImages) {
-	DOOB_print("Get images\n");
 
 	// EXAMPLE HOW TO USE:
 
 	DOOB_DxgiSwapchain* swapchain_obj = DOOB_GetObjectIfExists(g_dxgi_swapchains, DOOB_SWAPCHAIN_HANDLE_ID, swapchain);
 	if (!swapchain_obj) {
-		DOOB_print("Failed what\n");
 		return VK_ERROR_UNKNOWN;
 	}
 	if (pSwapchainImageCount == NULL) {
@@ -1863,7 +1915,6 @@ VkResult VKAPI_CALL DOOB_AcquireNextImageKHR(
 	VkSemaphore                                 semaphore,
 	VkFence                                     fence_ /*TODO*/,
 	uint32_t* pImageIndex) {
-	DOOB_print("Acquire image\n");
 	if (!pImageIndex) {
 		return VK_ERROR_UNKNOWN;
 	}
@@ -1884,7 +1935,6 @@ VkResult VKAPI_CALL DOOB_AcquireNextImageKHR(
 	}    // accounts for all possible swapchain writes, via storage image, framebuffer attachment or copy command
 	uint32_t image_idx = swapchain_obj->next_image_index;
 
-	DOOB_print("submitting\n");
 	// acquire mutex, so we can render to it
 	const uint64_t win32_acquire_key = MUTEX_KEY_VULKAN;
 	const uint32_t acquireTimeout = timeout == UINT64_MAX ? INFINITE : (uint32_t)std::min(timeout, (uint64_t)(INFINITE)-1);
@@ -1908,7 +1958,8 @@ VkResult VKAPI_CALL DOOB_AcquireNextImageKHR(
 	VkFence fence = VK_NULL_HANDLE;
 	VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
 	VkResult res;
-	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, CreateFence, (device, &fence_info, nullptr, &fence));
+	const VkAllocationCallbacks* pAllocator = swapchain_obj->hasAllocator ? &swapchain_obj->allocator : nullptr;
+	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, CreateFence, (device, &fence_info, pAllocator, &fence));
 	if (res != VK_SUCCESS) {
 		return VK_ERROR_DEVICE_LOST;
 	}
@@ -1920,7 +1971,7 @@ VkResult VKAPI_CALL DOOB_AcquireNextImageKHR(
 	if (res != VK_SUCCESS) {
 		return VK_ERROR_DEVICE_LOST;
 	}
-	DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, DestroyFence, (device, fence, nullptr));
+	DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, DestroyFence, (device, fence, pAllocator));
 
 	*pImageIndex = image_idx;
 	swapchain_obj->next_image_index = (swapchain_obj->next_image_index + 1) % swapchain_obj->swapchain_image_count;
