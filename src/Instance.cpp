@@ -284,7 +284,7 @@ static bool IsDxgiInteropEnabled(const VkPhysicalDeviceProperties& properties) {
 		}
 	}
 
-	return true; // Assuming it defaults to true for other GPUs
+	return true; // Assuming it WORKS for other GPUs
 }
 
 static constexpr DXGI_FORMAT DOOB_DXGIFormat_FromVkFormat(VkFormat format) {
