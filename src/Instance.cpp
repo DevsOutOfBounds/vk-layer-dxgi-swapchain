@@ -25,6 +25,7 @@ typedef std::lock_guard<std::mutex> scoped_lock;
 // TODO: TEMPORARY LOCATION
 #include <d3d11.h>
 #include <dxgi1_6.h>
+#include <dcomp.h>
 #include "D3D11FactoryInfo.h"
 
 struct DOOB_DxgiSwapchain {
@@ -35,6 +36,11 @@ struct DOOB_DxgiSwapchain {
 	uint32_t swapchain_image_count;
 	uint32_t next_image_index;
 
+	IDCompositionDevice* dcomp_device = {};
+	IDCompositionTarget* dcomp_target = {};
+	IDCompositionVisual* dcomp_visual = {};
+
+
 	ID3D11Texture2D* shared_intermediate_tex;
 	HANDLE shared_intermediate_handle;
 	IDXGIKeyedMutex* shared_keyed_mutex;
@@ -44,8 +50,9 @@ struct DOOB_DxgiSwapchain {
 
 	VkImage vk_mirrored_shared_image;
 	VkDeviceMemory vk_mirrored_shared_image_memory;
-	BOOL hasAllocator;
+	BOOL has_allocator;
 	VkAllocationCallbacks allocator;
+	LPSTR debug_name;
 };
 //
 
@@ -114,7 +121,11 @@ std::vector<DOOB_DxgiSwapchain*> g_dxgi_swapchains = {};
 #define DOOB_SWAPCHAIN_HANDLE_ID (0x1020'0000)
 
 #define DOOB_PRESENT_QUEUE_FAMILY 0
-
+#define D3DSetDebugName(interf, str)                                                                \
+    do {                                                                                            \
+        if (interf)                                                                                 \
+            interf->SetPrivateData(WKPDID_D3DDebugObjectName, static_cast<UINT>(strlen(str)), str); \
+    } while (false)
 static inline void DoobDebugPrint(const char* format, ...) {
 	char buffer[1024];
 
@@ -1285,6 +1296,7 @@ VkResult VKAPI_CALL DOOB_CreateDevice(
 	ASSIGN_DISPATCH(SetSwapchainPresentTimingQueueSizeEXT);
 	ASSIGN_DISPATCH(WaitForPresentKHR);
 	ASSIGN_DISPATCH(WaitForPresent2KHR);
+	ASSIGN_DISPATCH(SetDebugUtilsObjectNameEXT);
 
 	// vulkan functions we rely on!
 	ASSIGN_DISPATCH(CreateImage);
@@ -1523,7 +1535,7 @@ VkResult VKAPI_CALL DOOB_QueuePresentKHR(
 				VkFence fence;
 				VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
 				VkResult res;
-				const VkAllocationCallbacks* pAllocator = doob_sc->hasAllocator ? &doob_sc->allocator : nullptr;
+				const VkAllocationCallbacks* pAllocator = doob_sc->has_allocator ? &doob_sc->allocator : nullptr;
 				DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, CreateFence, (device, &fence_info, pAllocator, &fence));
 				if (res != VK_SUCCESS) {
 					return VK_ERROR_DEVICE_LOST;
@@ -1649,23 +1661,64 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
 		swapchain_obj->sync_interval = 0;
 		break;
 	}
-	swapchain_obj->hasAllocator = pAllocator != nullptr;
-	if (swapchain_obj->hasAllocator) {
+	swapchain_obj->has_allocator = pAllocator != nullptr;
+	if (swapchain_obj->has_allocator) {
 		swapchain_obj->allocator = *pAllocator;
 	}
-
+	swapchain_obj->debug_name = nullptr;
+	swapchain_obj->dcomp_device = nullptr;
+	swapchain_obj->dcomp_target = nullptr;
+	swapchain_obj->dcomp_visual = nullptr;
 	if (pCreateInfo->oldSwapchain == VK_NULL_HANDLE) {
 		// If no old swapchain was passed, assume that the window is free. If it isnt, then return a native window in use error
 		device_config.factory_info.device_context->Flush();
-		if (FAILED(device_config.factory_info.dxgi_factory->CreateSwapChainForHwnd(
-			factory_info.device,
-			win32_surface.hwnd,
-			&swapchain_desc,
-			nullptr,
-			nullptr,
-			&swapchain_obj->swapchain
-		))) {
-			return VK_ERROR_NATIVE_WINDOW_IN_USE_KHR;
+		if (swapchain_desc.AlphaMode == DXGI_ALPHA_MODE_PREMULTIPLIED) {
+			// no window
+#define CheckD3DResult(x, y) do { if (FAILED(x)) { DOOB_print("%s", y); return VK_ERROR_NATIVE_WINDOW_IN_USE_KHR; }} while (0)
+
+			CheckD3DResult(device_config.factory_info.dxgi_factory->CreateSwapChainForComposition(
+				device_config.factory_info.device_context, // Swap chain needs the queue so that it can force a flush on it.
+				&swapchain_desc,
+				nullptr,
+				&swapchain_obj->swapchain),
+				"Failed to CreateSwapChainForComposition");
+
+			CheckD3DResult(DCompositionCreateDevice(
+				nullptr,
+				__uuidof(IDCompositionDevice),
+				reinterpret_cast<void**>(swapchain_obj->dcomp_device)),
+				"Failed to DCompositionCreateDevice");
+			;
+
+			CheckD3DResult(swapchain_obj->dcomp_device->CreateTargetForHwnd(win32_surface.hwnd, TRUE, &swapchain_obj->dcomp_target),
+				"Failed to IDCompositionDevice::CreateTargetForHwnd");
+
+			CheckD3DResult(swapchain_obj->dcomp_device->CreateVisual(&swapchain_obj->dcomp_visual),
+				"Failed to IDCompositionDevice::CreateVisual");
+
+
+			CheckD3DResult(swapchain_obj->dcomp_visual->SetContent(swapchain_obj->swapchain),
+				"Failed to IDCompositionVisual::SetContent");
+			// Add visual to target
+			CheckD3DResult(swapchain_obj->dcomp_target->SetRoot(swapchain_obj->dcomp_visual),
+				"Failed to IDCompositionTarget::SetRoot");
+			// Commit composition
+			CheckD3DResult(swapchain_obj->dcomp_device->Commit(),
+				"Failed to IDCompositionDevice::Commit");
+
+#undef CheckD3DResult
+		}
+		else {
+			if (FAILED(device_config.factory_info.dxgi_factory->CreateSwapChainForHwnd(
+				factory_info.device,
+				win32_surface.hwnd,
+				&swapchain_desc,
+				nullptr,
+				nullptr,
+				&swapchain_obj->swapchain
+			))) {
+				return VK_ERROR_NATIVE_WINDOW_IN_USE_KHR;
+			}
 		}
 	}
 	else {
@@ -1681,8 +1734,14 @@ VkResult VKAPI_CALL DOOB_CreateSwapchainKHR(
 			return VK_ERROR_SURFACE_LOST_KHR;
 		}
 		swapchain_obj->swapchain = old_swapchain_obj->swapchain;
+		swapchain_obj->dcomp_device = old_swapchain_obj->dcomp_device;
+		swapchain_obj->dcomp_target = old_swapchain_obj->dcomp_target;
+		swapchain_obj->dcomp_visual = old_swapchain_obj->dcomp_visual;
 		old_swapchain_obj->swapchain_backbuffer = nullptr;
 		old_swapchain_obj->swapchain = nullptr;
+		old_swapchain_obj->dcomp_device = nullptr;
+		old_swapchain_obj->dcomp_target = nullptr;
+		old_swapchain_obj->dcomp_visual = nullptr;
 	}
 	HR(swapchain_obj->swapchain->GetBuffer(0, IID_PPV_ARGS(&swapchain_obj->swapchain_backbuffer)));
 
@@ -1833,7 +1892,9 @@ void VKAPI_CALL DOOB_DestroySwapchainKHR(
 	if (swapchain_obj == nullptr) {
 		return;
 	}
-
+	if (swapchain_obj->debug_name) {
+		free(swapchain_obj->debug_name);
+	}
 	if (swapchain_obj->swapchain_backbuffer != nullptr) {
 		swapchain_obj->swapchain_backbuffer->Release();
 	}
@@ -1849,6 +1910,16 @@ void VKAPI_CALL DOOB_DestroySwapchainKHR(
 	if (swapchain_obj->shared_keyed_mutex != nullptr) {
 		swapchain_obj->shared_keyed_mutex->Release();
 	}
+	if (swapchain_obj->dcomp_device != nullptr) {
+		swapchain_obj->dcomp_device->Release();
+	}
+	if (swapchain_obj->dcomp_target != nullptr) {
+		swapchain_obj->dcomp_target->Release();
+	}
+	if (swapchain_obj->dcomp_visual != nullptr) {
+		swapchain_obj->dcomp_visual->Release();
+	}
+
 
 	if (swapchain_obj->vk_mirrored_shared_image != VK_NULL_HANDLE) {
 		DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, DestroyImage, (device, swapchain_obj->vk_mirrored_shared_image, pAllocator));
@@ -1958,20 +2029,20 @@ VkResult VKAPI_CALL DOOB_AcquireNextImageKHR(
 	VkFence fence = VK_NULL_HANDLE;
 	VkFenceCreateInfo fence_info = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
 	VkResult res;
-	const VkAllocationCallbacks* pAllocator = swapchain_obj->hasAllocator ? &swapchain_obj->allocator : nullptr;
-	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, CreateFence, (device, &fence_info, pAllocator, &fence));
+	//const VkAllocationCallbacks* pAllocator = swapchain_obj->has_allocator ? &swapchain_obj->allocator : nullptr;
+	/*DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, CreateFence, (device, &fence_info, pAllocator, &fence));
 	if (res != VK_SUCCESS) {
 		return VK_ERROR_DEVICE_LOST;
-	}
+	}*/
 	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, QueueSubmit, (queue, 1, &submit_info, fence));
 	if (res != VK_SUCCESS) {
 		return VK_ERROR_DEVICE_LOST;
 	}
-	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, WaitForFences, (device, 1, &fence, VK_TRUE, timeout));
+	/*DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, WaitForFences, (device, 1, &fence, VK_TRUE, timeout));
 	if (res != VK_SUCCESS) {
 		return VK_ERROR_DEVICE_LOST;
-	}
-	DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, DestroyFence, (device, fence, pAllocator));
+	}*/
+	//DOOB_CALL_VOID_DISPATCH_TABLE(g_device_dispatch, device, DestroyFence, (device, fence, pAllocator));
 
 	*pImageIndex = image_idx;
 	swapchain_obj->next_image_index = (swapchain_obj->next_image_index + 1) % swapchain_obj->swapchain_image_count;
@@ -2180,6 +2251,29 @@ VkResult VKAPI_CALL DOOB_CreateWin32SurfaceKHR(
 
 	return res;
 }
+VkResult VKAPI_CALL DOOB_SetDebugUtilsObjectNameEXT(
+	VkDevice                                    device,
+	const VkDebugUtilsObjectNameInfoEXT* pNameInfo) {
+
+	if (pNameInfo->objectType == VK_OBJECT_TYPE_SWAPCHAIN_KHR) {
+		DOOB_DxgiSwapchain* swapchain_obj = DOOB_GetObjectIfExists(g_dxgi_swapchains, DOOB_SWAPCHAIN_HANDLE_ID, pNameInfo->objectHandle);
+		if (!swapchain_obj) {
+			return VK_ERROR_UNKNOWN;
+		}
+		if (swapchain_obj->debug_name) {
+			free(swapchain_obj->debug_name);
+		}
+		swapchain_obj->debug_name = (LPSTR)strdup(pNameInfo->pObjectName ? pNameInfo->pObjectName : "");
+		D3DSetDebugName(swapchain_obj->swapchain, swapchain_obj->debug_name);
+		return VK_SUCCESS;
+	}
+	else {
+		VkResult res;
+		DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, res, SetDebugUtilsObjectNameEXT, (device, pNameInfo));
+		return res;
+	}
+}
+
 
 // ==== OUR CUSTOM FUNCTIONS ====
 
@@ -2273,6 +2367,7 @@ VK_LAYER_EXPORT PFN_vkVoidFunction VKAPI_CALL DOOB_GetDeviceProcAddr(VkDevice de
 		DOOB_GETPROCADDR(SetSwapchainPresentTimingQueueSizeEXT);
 		DOOB_GETPROCADDR(WaitForPresentKHR);
 		DOOB_GETPROCADDR(WaitForPresent2KHR);
+		DOOB_GETPROCADDR(SetDebugUtilsObjectNameEXT);
 	}
 	PFN_vkVoidFunction result;
 	DOOB_CALL_DISPATCH_TABLE(g_device_dispatch, device, result, GetDeviceProcAddr, (device, pName));
